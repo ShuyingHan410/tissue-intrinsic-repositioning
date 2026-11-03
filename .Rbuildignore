@@ -1,0 +1,9 @@
+^reproducibility$
+^CITATION\.cff$
+^\.gitignore$
+^README\.md$
+^man/figures$
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.github$
+^LICENSE\.md$

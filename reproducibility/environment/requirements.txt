@@ -1,0 +1,8 @@
+# Python packages for h5ad extraction (gene_spatial_cluster/00_extract_all.py) and the figure scripts.
+# The cell-matching comparators (moscot, PASTE2, scSLAT, STalign) have their own conda
+# environments; see script/cluster/setup_envs.sh.
+numpy>=1.24
+pandas>=2.0
+h5py>=3.8
+matplotlib>=3.7
+pillow>=9.0

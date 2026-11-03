@@ -1,0 +1,429 @@
+---
+title: "Simulation Validation of a Population-Relative Directional Gene-Repositioning Method"
+subtitle: "v16 benchmark — operative design, frozen results, and manuscript-ready material"
+date: "Generated `r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    self_contained: true
+    fig_width: 9
+    fig_height: 4.6
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, dpi = 130)
+suppressMessages({library(readr); library(dplyr); library(tidyr); library(ggplot2); library(patchwork); library(knitr)})
+## ---- every number below is read from the frozen result files; no simulation is re-run ----
+t1   <- read_csv("exp1_typeI.csv", show_col_types = FALSE)
+thr  <- read_csv("exp1_thresholds.csv", show_col_types = FALSE)
+n2   <- read_csv("exp1_null2.csv", show_col_types = FALSE)
+F0   <- readRDS("exp1_F0.rds")
+pw   <- read_csv("batch2_power.csv", show_col_types = FALSE)
+sp   <- read_csv("batch2_spec.csv", show_col_types = FALSE)
+fd   <- read_csv("batch2_fdr.csv", show_col_types = FALSE)
+b3   <- read_csv("batch3_table.csv", show_col_types = FALSE)
+e9   <- read_csv("batch3_exp9.csv", show_col_types = FALSE)
+f6b  <- read_csv("batch3_fdr6b.csv", show_col_types = FALSE)
+nk   <- read_csv("null_k10.csv", show_col_types = FALSE)
+ti2  <- read_csv("tau_i2_k10.csv", show_col_types = FALSE)
+ppc  <- read_csv("ppc_neff.csv", show_col_types = FALSE)
+ppc6 <- read_csv("ppc_neff_Fibro6.csv", show_col_types = FALSE)
+sig  <- read_csv("sigma_mouse_summary.csv", show_col_types = FALSE)
+abB  <- read_csv("ablB_k10.csv", show_col_types = FALSE)
+att  <- read_csv("gate_dryrun/attrition_eligibility.csv", show_col_types = FALSE)
+rc9  <- if (file.exists("recheck_exp9.log")) readLines("recheck_exp9.log") else character(0)
+rc6  <- if (file.exists("recheck_fibro6.log")) readLines("recheck_fibro6.log") else character(0)
+
+P3   <- c("proposed", "gam_fs", "despace2")
+mlab <- c(proposed = "Proposed (δ)", gam_fs = "GAM-fs", despace2 = "DESpace2", gam_naive = "Naive GAM (control)", pbulk_de = "Pseudobulk DE", proposed_lambda = "Proposed + λ")
+mcol <- c(proposed = "#2a78d6", gam_fs = "#eb6834", despace2 = "#1baf7a", gam_naive = "#eda100", pbulk_de = "#e87ba4", proposed_lambda = "#7b4fc4")
+pal  <- setNames(unname(mcol), unname(mlab))
+taus <- c(0, .05, .15, .30)
+pct  <- function(x, d = 1) ifelse(is.na(x), "—", sprintf(paste0("%.", d, "f"), 100 * x))
+ci   <- function(p, n = 200) 1.96 * sqrt(p * (1 - p) / n)
+thm  <- theme_minimal(base_size = 12) + theme(panel.grid.minor = element_blank(), legend.position = "bottom", legend.title = element_blank(),
+        strip.text = element_text(face = "bold"), plot.title = element_text(face = "bold"), plot.subtitle = element_text(color = "grey30"))
+lab_m <- function(d) d %>% mutate(Method = factor(mlab[method], levels = unname(mlab)))
+DESIGN <- "k = 10 slices/arm (4 pseudo-mice, 2/3/3/2), M = 64, NB size 1, matched pseudo-arms redrawn per replicate, gate SE₀ < 0.05 & ≥ 30 cells"
+```
+
+<div style="border:2px solid #2a78d6; border-radius:8px; padding:14px 18px; background:#f4f8fd; margin-bottom:14px;">
+**MAIN CONCLUSION** *(every value at the operative design: `r DESIGN`, unless stated)*
+
+* **Calibration** — the proposed method holds 4.4–5.1% Type I error at all four heterogeneity levels, at 10 and 20 slices per arm, at 27 and 331 molecules per slice, and on a second cell type; ≈ 10,000 effective null tests per cell. GAM-fs and DESpace2 are nominal at τ<sub>θ</sub> ≤ 0.05 and reach 7% at τ<sub>θ</sub> = 0.15 and 8–12% at 0.30, unchanged by doubling the slices.
+* **Power** — at matched operating points the three spatial methods are at parity for |D| ≥ 0.05 at every heterogeneity level. The 5-slice findings of a GAM-fs edge and a DESpace2 reversal at high heterogeneity do not recur at the real Day-0 design.
+* **Specificity** — the method responds only to directional, population-relative repositioning: 6.0% under an abundance doubling, 3.5–5.5% under non-directional reshaping with δ pinned at zero, 3.0% when the entire population drifts with the gene's relative position fixed, and 3–6.5% under a 3× abundance change in either direction.
+* **FDR** — Benjamini–Hochberg control holds natively at both designs (realised 3.0% at k = 10, 4.3% at k = 20, q = 0.05) with 85% / 100% of true genes discovered. The 5-slice discovery rate of 5% was the small-df t, not the method.
+* **Deployed pipeline** — at the observed level of mouse correlation (σ<sub>mouse</sub> = 0.07, real upper quartile) the uncorrected test runs at 7.9%; the blank-derived λ returns it to 5.0%. Under a stress level twice the real 90th percentile, λ over-corrects to ≈ 0% because blanks share the genes' mouse draw.
+</div>
+
+<div style="border:2px solid #b8860b; border-radius:8px; padding:14px 18px; background:#fdf9ee; margin-bottom:18px;">
+**WHAT CAN AND CANNOT BE CLAIMED**
+
+*Can claim:* for directional first-moment repositioning, on a matched substrate, at a matched false-positive operating point, the three spatial methods have equal power and the proposed method is the only one whose *unmatched* operation — nominal p and nominal q — is trustworthy under slice heterogeneity; the estimand is population-relative (Null 3A); calibration transfers across slice count, abundance, and cell type; λ is inert without mouse correlation, corrective at the observed level, conservative beyond it.
+
+*Cannot claim:* universal superiority or "best spatial method" (GAM-fs and DESpace2 detect non-directional reshaping the proposed method ignores by design); that comparator rejections under population drift or reshaping are Type I errors (their nulls are false there); that DESpace2's FDR can be repaired by an all-null calibration (its null is panel-dependent); that τ<sub>θ</sub> equals I² (realised I² is reported everywhere); anything about pseudobulk on real geometry (uninformative there).
+</div>
+
+# 1. The scientific question and estimand
+
+Between two conditions, does a gene's transcripts' mean position along the crypt–serosa axis move **relative to the cells the gene is expressed in**? Per slice the statistic is the transcript-weighted mean position minus the mean position of all cells of the type, \(\delta_s = \sum n_i r_i / \sum n_i - \bar r\), with the exact permutation-null standard error \(SE_0 = s_r\sqrt{1/N_{\mathrm{eff}} - 1/N}\), \(N_{\mathrm{eff}} = (\sum n_i)^2/\sum n_i^2\). Slices are pooled per condition by REML with the Knapp–Hartung adjustment and the conditions contrasted on a Welch–Satterthwaite *t*. The estimand is first-moment and population-relative: abundance change, symmetric reshaping, and whole-population drift leave it at zero by construction, and the benchmark tests each of those boundaries explicitly.
+
+# 2. Methods compared and their roles
+
+| method | fits | tests | slices | mice | role |
+|---|---|---|---|---|---|
+| **Proposed (δ)** | δ per slice, REML+KH per arm, *t* contrast; λ from blanks where present | did the population-relative mean position move? | pooling unit | via λ | primary |
+| **GAM-fs** | NB GAM: condition smooth, ordered-factor difference smooth, factor smooth per slice, mouse random effect (mgcv 1.9.4) | does the spatial profile differ? | factor smooth | random intercept | primary comparator |
+| **DESpace2** | slice × 5-domain pseudobulk, edgeR QLF domain × condition on a 50-gene panel (DESpace 2.2.2) | does the domain profile differ? | replicate unit | — | primary comparator |
+| Pseudobulk DE | slice totals, quasi-Poisson on condition | did abundance change? | replicate unit | — | abundance control; never in power panels |
+| Naive GAM | GAM-fs without slice or mouse terms | as GAM-fs | ignored | ignored | pseudoreplication negative control; Type I panels only |
+
+"All five" in any table means *run*, not compared on equal footing. Every comparative sentence in this report is scoped to the primary comparison.
+
+# 3. Design — the operative protocol and how each setting was fixed
+
+**Table 1. Design matrix (v16 §0.4).** All at the reference design unless a cell says otherwise; 200 replicates per cell (FDR: 50 × 500 genes); cluster-robust Monte Carlo SE with the replicate as the cluster.
+
+| # | experiment | k | scenarios | grid | methods | status |
+|---|---|---:|---|---|---|---|
+| 0 | generator fidelity | — | real vs simulated slices | M ∈ {27, 64, 331}; size ∈ {0.7, 1, 2}; both substrates | — | done |
+| 1 / 1b | calibration | 10 / 20 | Null 1, Null 2 | τ<sub>θ</sub> ∈ {0, .05, .15, .30}; 50 null genes/rep | all 5 | done |
+| 2 | directional power | 10 | gained, reversed | \|D\| ∈ {.025, .05, .075} × τ<sub>θ</sub> | all 5 | done |
+| 3 | specificity | 10 | DE-only, repositioning-only, non-directional ×2 | τ<sub>θ</sub> = .15 (deliberate stress) | all 5 | done |
+| 4B | REML+KH vs fixed | 10 | null, gained | τ<sub>θ</sub> ∈ {0, .18} | proposed | done (local) |
+| 5 | real geometry | real 10 v 18; bootstrap 5 v 5 | Null 3A/3B, gained, reversed; Null 1, gained | \|D\| = .05 | all 5 | done |
+| 6 / 6b | FDR | 10, 20 / 10 | 400 null + 100 gained; 6b with ρ = .7 gene blocks | τ<sub>θ</sub> = .15 | primary + pbulk | done |
+| 7 / 7b | abundance | 10 | M ∈ {27, 331}; arm B ∈ {21, 64, 192} | τ<sub>θ</sub> grids | all 5 | done |
+| 8 | slice count | 20 | gained .05 | τ<sub>θ</sub> | all 5 | done |
+| 9 | deployed pipeline (λ on) | 10 | Null 1, gained .05 | σ<sub>mouse</sub> ∈ {.07, .20} × τ<sub>θ</sub> ∈ {.05, .15} × {normal, t₃, outlier}; 300 blanks/rep | proposed ± λ, GAM-fs, DESpace2 | done |
+| 10 | second lineage | 10 | Null 1, gained .05 | Fibro 6; size 2; M = 43 | proposed, GAM-fs | done |
+| 11 | awkward shapes | 10 | localised, bimodal | \|D\| = .05, τ<sub>θ</sub> = .15 | all 5 | done |
+
+## 3.1 Substrate
+
+Real Day-0 Fibro 2 coordinates (10,211 cells, 10 slices, 4 mice; harmonised orientation lumen = 0, outer = 1; mean *r* 0.463, SD 0.128) pooled and resampled into two arms of **10 pseudo-slices from 4 pseudo-mice contributing 2, 3, 3, 2 slices — the real Day-0 design**. The v12 benchmark used 5 slices per arm, a value inherited from an earlier literal-split idea that never matched the real parent arm; the primary design was corrected before any run at the new design and the completed k = 5 results are retained as a labelled stress test. A k = 20 variant (8 pseudo-mice) matches the Day-9 arms. The substrate is redrawn every replicate. Pseudo-mice are grouping labels, not animals: this is the internal-validity substrate (exact null, independent arms, any k). Realism is tested on the real Day 0 vs Day 9 slices and on a within-slice bootstrap of the real Day-0 slices (Experiment 5). Real slices carry ≈ τ<sub>θ</sub> 0.06 of geometric heterogeneity for an effect gene that pooling removes; on real-geometry substrates total heterogeneity is summarised only by realised I².
+
+## 3.2 Settings fixed by measurement
+
+```{r fidelity}
+w <- ppc %>% filter(stat == "ratio", source %in% c("real", "sim_size0.7_theta0", "sim_size1_theta0", "sim_size2_theta0")) %>%
+  mutate(source = recode(source, real = "real Fibro 2", sim_size0.7_theta0 = "NB size 0.7", sim_size1_theta0 = "NB size 1", sim_size2_theta0 = "NB size 2"),
+         stratum = recode(stratum, low_27 = "M = 27", med_64 = "M = 64", high_331 = "M = 331", blank_16 = "blanks, M = 16")) %>%
+  select(stratum, source, median) %>% pivot_wider(names_from = source, values_from = median)
+kable(w %>% mutate(across(where(is.numeric), ~sprintf("%.3f", .x))), caption = "Table 2. Generator fidelity (Experiment 0): median N_eff / N_event, real Day-0 Fibro 2 gene × slice observations vs simulated pseudo-slices at matched abundance. Size 1 matches every real median within 1%; size 2 (the k = 5 benchmark) overstated the effective count by 4–10%. Fibro 6 requires size 2 (fewer cells per slice).")
+```
+
+```{r tau-i2}
+kable(ti2 %>% filter(k == 10) %>% transmute(`τ_θ` = sprintf("%.2f", tau), `realised I² (median)` = sprintf("%.1f%%", I2_median), IQR = sprintf("[%.0f, %.0f]", I2_p25, I2_p75)),
+      caption = "Table 3. τ_θ → realised I² at k = 10 (null genes, 100 replicates). The real Day-0 parent-arm median I² is 13.5%, realised by τ_θ ≈ 0.05, which is therefore the reference level; 0.15 is the upper quartile and 0.30 lies beyond the real 90th percentile. τ_θ is the imposed parameter, never reported as an I².")
+```
+
+```{r sigma}
+kable(sig %>% filter(grepl("daughter", side)) %>% transmute(lineage, `genes` = n_genes, `median mouse share` = sprintf("%.2f", share_mouse_med), `σ_mouse(θ) median` = sprintf("%.3f", sigma_mouse_theta_med), p75 = sprintf("%.3f", sigma_mouse_theta_p75), p90 = sprintf("%.3f", sigma_mouse_theta_p90)),
+      caption = "Table 4. Mouse-level variance in the real Day-9 daughter arms (three-level REML, slices in mice, 8 mice, 18–21 slices). The typical gene shows no detectable mouse effect; blanks show the same p90 (0.14), so the upper tail is the estimation floor. Reference σ_mouse = 0; Experiment 9 runs 0.07 (real upper quartile) and 0.20 (stress, ≈ 2× the real p90).")
+```
+
+**Gate.** The benchmark and the headline real analysis now share one per-slice gate, ≥ 30 cells and SE₀ < 0.05, frozen 2026-09-13. The real pipeline previously used a molecule/rate floor that admitted 1–2-molecule slices on Day 9. Under the SE₀ gate the real D1 call count moved from 227 to 199 at q < 0.05; every lost call had q ∈ (0.01, 0.05) and none of the 141 calls below q = 0.01 was lost. Blank λ was essentially unchanged (D1 1.26 → 1.29).
+
+# 4. A — Calibration (Experiments 1 and 1b)
+
+**Question: does each method hold its stated Type I error as between-slice heterogeneity rises, at both slice counts?**
+
+```{r a-type1, fig.height=4.4, fig.cap=paste0("**Figure A1. Type I error vs heterogeneity, k = 10 (left) and k = 20 (right).** Null 1, nominal p < 0.05, 50 null genes × 200 replicates (≈ 10,000 effective tests) per point; error bars are cluster-robust 95% intervals; grey band is the Monte Carlo interval around a true 5% at n_eff = 10,000. ", DESIGN, "; realised I² ≈ 0 / 14 / 54 / 84% at τ_θ = 0 / .05 / .15 / .30.")}
+d <- t1 %>% filter(null == "null1") %>% lab_m()
+ggplot(d, aes(tau, alpha, colour = Method)) +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = .05 - ci(.05, 10000), ymax = .05 + ci(.05, 10000), fill = "grey86", alpha = .5) +
+  geom_hline(yintercept = .05, linetype = "dotted", colour = "grey40") + geom_line(linewidth = .8) +
+  geom_pointrange(aes(ymin = lo, ymax = hi), size = .35) + facet_wrap(~k, labeller = label_both) +
+  scale_colour_manual(values = pal) + scale_x_continuous(breaks = taus) + scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = expression(tau[theta]), y = "Type I error") + thm
+```
+
+```{r a-table}
+tb <- t1 %>% filter(null == "null1") %>% mutate(v = sprintf("%s [%s, %s]", pct(alpha), pct(lo), pct(hi))) %>% select(k, tau, method, v) %>%
+  pivot_wider(names_from = method, values_from = v) %>% select(k, tau, proposed, gam_fs, despace2, pbulk_de, gam_naive)
+kable(tb, col.names = c("k", "τ_θ", mlab[c("proposed", "gam_fs", "despace2", "pbulk_de", "gam_naive")]), caption = "Table 5. Type I error (%) at nominal 0.05 with cluster-robust 95% intervals. Band for 'nominal' is [3%, 7%].")
+```
+
+```{r a-null2}
+kable(n2 %>% mutate(v = pct(alpha)) %>% select(k, tau, method, v) %>% pivot_wider(names_from = method, values_from = v) %>% select(k, tau, proposed, gam_fs, despace2, pbulk_de, gam_naive),
+      col.names = c("k", "τ_θ", mlab[c("proposed", "gam_fs", "despace2", "pbulk_de", "gam_naive")]),
+      caption = "Table 6. Null 2 (gene positioned identically in both arms, θ = 0.356) rejection rates (%). Tracks Null 1 for every method: no comparator is testing 'is there a gradient?' — the ordered-factor trap of the first pilot is absent.")
+```
+
+```{r a-thr}
+kable(thr %>% filter(method %in% c(P3)) %>% transmute(k, `τ_θ` = sprintf("%.2f", tau), method = mlab[method], `c_0.05` = signif(c_0.05, 3), `c_0.01` = signif(c_0.01, 3), `c_0.001` = signif(c_0.001, 3)) %>% arrange(k, `τ_θ`, method),
+      caption = "Table 7. Design-specific matched thresholds c_{m,k,τ}: the 5th / 1st / 0.1st percentile of each method's own Null 1 p-values. A threshold learned at one k is never applied at another. Comparators non-nominal at a design (τ_θ ≥ 0.15) have their power reported at c_0.05 there; both nominal and matched are tabulated everywhere.")
+```
+
+**Reading.** The proposed method is calibrated at all eight designs (4.4–5.1%); its own cutoffs sit at 0.049–0.054, so matched and nominal coincide. GAM-fs and DESpace2 are nominal at τ<sub>θ</sub> ≤ 0.05, at 7.0–7.4% at 0.15, and at 8.0–8.4% / 11.4–11.6% at 0.30. **Doubling k from 10 to 20 leaves their inflation unchanged**: it is structural to how these methods treat slice-level gradient variation, not a small-design artefact. The naive GAM reaches 19% and 44%. The QQ plots (`exp1_qq.png`) show the comparators' departure as a scale inflation that steepens into the tail; the proposed method sits on or slightly below the diagonal in the far tail (Knapp–Hartung conservatism at small p). GAM-fs at k = 20, τ<sub>θ</sub> = 0.15 lands exactly on the 7.0% boundary and passes the mechanical rule while the same behaviour at k = 10 (7.3%) fails it; both thresholds are reported everywhere so the boundary hides nothing.
+
+# 5. B — Directional power (Experiment 2)
+
+**Question: what power remains once calibration is made comparable?**
+
+```{r b-power, fig.height=5.4, fig.cap=paste0("**Figure B1. Power vs |D|, reported rule** (nominal p < 0.05 where the method is nominal at that design, its own c_{m,10,τ} otherwise), faceted by pattern (rows) and τ_θ (columns); 200 replicates per cell, ±4 points. ", DESIGN, ". Naive GAM and pseudobulk omitted (controls).")}
+d <- pw %>% filter(method %in% P3) %>% lab_m()
+ggplot(d, aes(D, reported, colour = Method)) + geom_line(linewidth = .8) +
+  geom_pointrange(aes(ymin = pmax(0, reported - ci(reported)), ymax = pmin(1, reported + ci(reported))), size = .3) +
+  facet_grid(scen ~ tau, labeller = label_both) + scale_colour_manual(values = pal) + scale_x_continuous(breaks = c(.025, .05, .075)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) + labs(x = "|D| (normalised positional scale)", y = "power (reported rule)") + thm
+```
+
+```{r b-matched, fig.height=4.2, fig.cap="**Figure B2. Nominal vs matched power at |D| = 0.05** (gained and reversed averaged). Pale = nominal p < 0.05; solid = each method's own design-specific 5% cutoff. The comparators' nominal bars shrink toward the proposed method's once their Type I inflation is priced out at τ_θ ≥ 0.15."}
+ag <- pw %>% filter(method %in% P3, abs(D - .05) < 1e-9) %>% group_by(method, tau) %>% summarise(nominal = mean(nominal), matched = mean(matched, na.rm = TRUE), .groups = "drop") %>%
+  pivot_longer(c(nominal, matched), names_to = "type", values_to = "power") %>% lab_m() %>% mutate(type = factor(type, c("nominal", "matched")))
+ggplot(ag, aes(Method, power, fill = Method, alpha = type)) + geom_col(position = position_dodge(.75), width = .65) + facet_wrap(~tau, labeller = label_both, nrow = 1) +
+  scale_fill_manual(values = pal, guide = "none") + scale_alpha_manual(values = c(nominal = .45, matched = 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) + labs(y = "power at |D| = 0.05", x = NULL) + thm + theme(axis.text.x = element_blank())
+```
+
+```{r b-table}
+tb <- pw %>% filter(method %in% P3) %>% mutate(v = sprintf("%s%s", pct(reported, 0), ifelse(nominal_ok %in% TRUE, "", " (m)"))) %>%
+  select(scen, D, tau, method, v) %>% pivot_wider(names_from = method, values_from = v) %>% arrange(scen, D, tau)
+kable(tb, col.names = c("pattern", "|D|", "τ_θ", mlab[P3]), caption = "Table 8. Reported power (%); (m) = at the method's design-specific matched threshold.")
+```
+
+**Reading.** At matched operating points the three spatial methods are at parity at every heterogeneity level for |D| ≥ 0.05; every pairwise difference is inside the Monte Carlo interval. The k = 5 GAM-fs edge at τ<sub>θ</sub> = 0.15 (82 vs 73%) is gone (98.5 vs 99.5%), and the k = 5 ranking reversal at 0.30 is not reproduced (56.5 / 55 / 58.5%, a tie). The one consistent gap is DESpace2 at |D| = 0.025 with low heterogeneity (60–69% vs 83–89%): a 2.5%-of-axis shift moves few transcripts across a domain boundary.
+
+# 6. C — Specificity and method boundaries (Experiment 3)
+
+```{r c-table}
+tb <- sp %>% filter(method != "gam_naive") %>% mutate(v = pct(nominal)) %>% select(scen, method, v) %>% pivot_wider(names_from = method, values_from = v) %>%
+  mutate(scen = recode(scen, de_only = "DE-only: M 64 → 128, no movement", repo_only = "repositioning only, |D| = .05", nd_moderate = "non-directional, moderate (Δdomain .06)", nd_strong = "non-directional, strong (Δdomain .20)")) %>%
+  select(scen, proposed, gam_fs, despace2, pbulk_de)
+kable(tb, col.names = c("scenario (τ_θ = 0.15, deliberate stress)", mlab[c(P3, "pbulk_de")]), caption = "Table 9. Rejection rates (%) at nominal 0.05. NOT Type I for GAM-fs / DESpace2 on the non-directional rows (their nulls are false there) nor for pseudobulk on DE-only. Specificity is evaluated under upper-quartile heterogeneity to test whether estimand separation persists under a challenging but empirically relevant level of slice-to-slice variation.")
+```
+
+**Reading.** The proposed method is blind to an abundance doubling (6.0%) and to symmetric reshaping with δ held at exactly zero (3.5% / 5.5%), and detects the matched repositioning (97%). GAM-fs and DESpace2 detect reshaping by design (84–100% / 51–100%) and are quiet on abundance. Pseudobulk fires only on abundance. The expected Experiment-3 pattern is the paper's clearest single statement:
+
+| scenario | proposed | GAM-fs / DESpace2 | pseudobulk DE |
+|---|:-:|:-:|:-:|
+| DE-only | − | − | **+** |
+| directional repositioning | **+** | + | − |
+| non-directional spatial change | − | **+** | − |
+| population drift, δ fixed (Null 3A, §8) | − | + (DESpace2) | − |
+
+# 7. D — Component ablation: REML + Knapp–Hartung vs fixed-effect pooling (Experiment 4B, k = 10)
+
+```{r d-table}
+kable(abB %>% mutate(v = pct(reject)) %>% select(tau, pattern, D, pooling, v) %>% pivot_wider(names_from = pooling, values_from = v) %>% arrange(tau, D),
+      col.names = c("τ_θ", "pattern", "|D|", "fixed-effect", "REML + KH"), caption = "Table 10. Rejection (%) at nominal 0.05, proposed method, 200 × 1 gene per cell (null at τ_θ = 0.18 re-run at 50 genes/rep: fixed 21.9% [21.1, 22.7] vs REML+KH 4.8% [4.3, 5.2]). τ_θ = 0.18 realises I² ≈ 60%.")
+```
+
+The random-effects layer is the calibration component: forcing τ² = 0 inflates Type I to 22% at realised I² ≈ 60% while REML+KH holds 4.8%; the fixed-effect power edge at |D| = 0.025 (77% vs 42%) is bought with four times the false-positive rate.
+
+# 8. E — Multiple testing (Experiments 6 and 6b)
+
+```{r e-table}
+tb <- fd %>% filter(method %in% c(P3, "pbulk_de")) %>% mutate(FDR05 = pct(FDR_q05), TPR05 = pct(TPR_q05, 0), FDR10 = pct(FDR_q10), TPR10 = pct(TPR_q10, 0), qstar = ifelse(is.na(q_star), "—", sprintf("%.3f", q_star)), TPRq = pct(TPR_at_qstar, 0)) %>%
+  transmute(k, method = mlab[method], mode, `FDR % (q=.05)` = FDR05, `TPR % (q=.05)` = TPR05, `FDR % (q=.10)` = FDR10, `TPR % (q=.10)` = TPR10, `oracle q*` = qstar, `TPR % at q*` = TPRq)
+kable(tb, caption = "Table 11. Realised FDR and TPR under BH, 400 null + 100 gained genes (|D| = 0.05) on one shared substrate per replicate, τ_θ = 0.15, 50 replicates. 'native' = BH on raw p; 'calibrated' = BH on p̃ = F̂₀(p), each method's Experiment-1 empirical null CDF at the same design (a simulation-only device). q* = the BH level at which the method's realised FDR is 5% (oracle).")
+```
+
+```{r e-fig, fig.height=4.4, fig.cap="**Figure E1. Realised FDR vs nominal BH q**, native (dashed) and F₀-calibrated (solid), k = 10 and 20. Dotted diagonal = honest control. The proposed method tracks the diagonal natively; GAM-fs reaches it only after calibration; DESpace2 sits above it in both modes."}
+F0k <- function(m, k) F0[[sprintf("%s|k%d|tau0.15", m, k)]]
+curves <- list()
+for (id in c(29, 30)) { z <- readRDS(sprintf("batch2_out/cell_%02d.rds", id)); k <- z$cell$k; truth <- z$truth
+  for (m in P3) for (mode in c("native", "calibrated")) {
+    A <- sapply(z$P, function(P) { p <- P[, m]; if (mode == "calibrated") p <- ecdf(F0k(m, k))(p); p.adjust(p, "BH") })
+    qs <- seq(.002, .2, by = .002)
+    fdrq <- vapply(qs, function(q) mean(apply(A, 2, function(a) { s <- a < q; R <- sum(s, na.rm = TRUE); if (R > 0) sum(s & !truth, na.rm = TRUE) / R else 0 })), numeric(1))
+    curves[[length(curves) + 1]] <- data.frame(k = k, method = m, mode = mode, q = qs, FDR = fdrq) } }
+cv <- bind_rows(curves) %>% lab_m()
+ggplot(cv, aes(q, FDR, colour = Method, linetype = mode)) + geom_abline(linetype = "dotted", colour = "grey40") + geom_line(linewidth = .8) +
+  facet_wrap(~k, labeller = label_both) + scale_colour_manual(values = pal) + scale_linetype_manual(values = c(native = "dashed", calibrated = "solid")) +
+  labs(x = "nominal BH q", y = "realised FDR") + thm
+```
+
+```{r e-6b}
+tb <- bind_rows(fd %>% filter(k == 10) %>% mutate(genes = "independent (Exp 6)"), f6b %>% mutate(genes = "block-correlated ρ = .7 (Exp 6b)")) %>% filter(method %in% P3) %>%
+  mutate(v = sprintf("%s / %s", pct(FDR_q05), pct(TPR_q05, 0))) %>% select(genes, method, mode, v) %>% pivot_wider(names_from = mode, values_from = v) %>% mutate(method = mlab[method])
+kable(tb, caption = "Table 12. Realised FDR % / TPR % at q = 0.05, k = 10: independent genes vs block-correlated slice nudges (25 blocks of 20, within-block correlation 0.49). Co-regulation raises every method's FDR by 0.5–2 points; the ordering is unchanged.")
+```
+
+```{r e-panel}
+pc <- list()
+for (id in c(29, 30)) { z <- readRDS(sprintf("batch2_out/cell_%02d.rds", id)); k <- z$cell$k; truth <- z$truth
+  for (m in P3) { f <- F0k(m, k); pm <- unlist(lapply(z$P, function(P) P[!truth, m])); pm <- pm[is.finite(pm)]
+    pc[[length(pc) + 1]] <- data.frame(k = k, method = mlab[m], `all-null 50-gene panel (Exp 1)` = pct(mean(f < .05)), `400 nulls inside the 500-gene mixture` = pct(mean(pm < .05)), check.names = FALSE) } }
+kable(bind_rows(pc), caption = "Table 13. Why DESpace2's calibration does not close the gap: P(p < 0.05) among null genes. DESpace2's null inside a mixed panel (100 of 500 genes carry a real domain × condition interaction) is far more extreme than in the all-null panel it was calibrated on; GAM-fs and the proposed method are unchanged. edgeR's shared dispersion and normalisation are estimated on the panel, so the null depends on panel composition — a property of panel-based testing under a mixed panel, not repairable by an all-null calibration.")
+```
+
+**Reading.** Only the proposed method holds its stated FDR natively at both k (3.0% / 4.3% at q = 0.05), discovering 85% / 100% of true genes. **The k = 5 discovery rate of 5.4% was the Knapp–Hartung small-df tail, not the method**: at the real Day-0 design it is 85%, at the daughter-arm design 100%. GAM-fs runs at 7.7–7.9% natively and returns to 3.5% after calibration at a cost of ≈ 7 TPR points at k = 10 (none at k = 20). DESpace2 runs at 19% / 27% natively and calibration brings it only to 12% / 19% (Table 13).
+
+# 9. F — Robustness (Experiments 5, 7, 7b, 8, 9, 10, 11)
+
+```{r f-helpers}
+wide3 <- function(e, meths = c(P3, "pbulk_de"), val = "nominal", extra = character(0)) b3 %>% filter(exp == e, method %in% meths) %>% mutate(v = pct(.data[[val]])) %>%
+  select(any_of(c("sub", "scen", "D", "tau", "M_B", "k", "shape", extra)), method, v) %>% pivot_wider(names_from = method, values_from = v) %>% rename(any_of(setNames(names(mlab), unname(mlab))))
+```
+
+## 9.1 Real geometry and the within-slice bootstrap (Experiment 5)
+
+```{r f5}
+d <- wide3("5") %>% mutate(sub = recode(sub, tilt = "pseudo, population +0.20", real = "real D0 Fibro 2 vs D9 IAF 4", boot = "bootstrap of real D0 slices, 2 v 2 mice (k = 5)"), tau = sprintf("%.2f", tau)) %>% select(-M_B, -shape)
+kable(d, col.names = c("substrate", "scenario", "|D|", "τ_θ", "k", mlab[c(P3, "pbulk_de")]), caption = "Table 14. Rejection rates (%) at nominal 0.05. Null 3A: whole population shifted +0.20 (SD preserved, moment-balanced tilt) while the gene keeps δ = 0.05 relative to its cells in both arms — null ONLY for the population-relative estimand. Realised I² 49–55% at τ_θ = 0.15 on these substrates.")
+```
+
+**Reading.** Under population drift the proposed method rejects 3.0% and pseudobulk 1.5%; GAM-fs 6.5%; **DESpace2 71%** — it reads the population shift as a gene effect (a detection under its own null, not an error). Power on the real slices is at ceiling for the three spatial methods. The bootstrap of the real Day-0 slices reproduces the pooled k = 5 substrate within Monte Carlo error (proposed 5.0% / 5.0% Type I; 94.5% / 62% power at τ<sub>θ</sub> = 0 / 0.15 vs 97% / 73% pooled), the difference being the ≈ 0.06 of geometric heterogeneity real slices carry (realised I² 49% vs 45%). **Pseudobulk is uninformative on the real substrate**: Day-9 slices span 33–2,567 cells, per-cell rates vary 20-fold across slices, the quasi-Poisson dispersion is ≈ 130, and its p-values sit at 0.5–0.9 in every cell.
+
+## 9.2 Abundance (Experiments 7 and 7b)
+
+```{r f7-fig, fig.height=3.8, fig.cap="**Figure F1. Matched power at |D| = 0.05 vs abundance M (both arms), by τ_θ.** M = 64 from Experiment 2. Above 64 power is floored by heterogeneity (τ² does not shrink with M); DESpace2 alone loses ground at M = 27."}
+d <- b3 %>% filter(exp == "7", scen == "gained", abs(D - .05) < 1e-9, method %in% P3) %>% select(tau, M_B, method, matched) %>%
+  bind_rows(pw %>% filter(scen == "gained", abs(D - .05) < 1e-9, method %in% P3) %>% transmute(tau, M_B = 64, method, matched)) %>% lab_m()
+ggplot(d, aes(factor(M_B), matched, colour = Method, group = Method)) + geom_line(linewidth = .8) + geom_point(size = 2) + facet_wrap(~tau, labeller = label_both, nrow = 1) +
+  scale_colour_manual(values = pal) + scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) + labs(x = "M (molecules per slice)", y = "matched power") + thm
+```
+
+```{r f7-null}
+d <- wide3("7") %>% filter(scen == "null1") %>% mutate(tau = sprintf("%.2f", tau)) %>% select(tau, M_B, proposed = `Proposed (δ)`, `GAM-fs`, DESpace2, `Pseudobulk DE`)
+kable(d, col.names = c("τ_θ", "M", mlab[c(P3, "pbulk_de")]), caption = "Table 15. Null 1 Type I (%) at M = 27 and 331 (200 × 1 gene; ±3 points). The proposed method is calibrated at both strata. DESpace2's inflation grows with abundance (19.5% at M = 331, τ_θ = 0.30) because the domain-share interaction becomes more confident as within-slice noise shrinks while unmodelled slice-to-slice variation stays. Realised I² at τ_θ = 0.05 rises from 9% (M = 27) to 32% (M = 331) for the same reason. P(testable) = 1 everywhere: SE₀ < 0.05 first fails near N_eff ≈ 7.")
+```
+
+```{r f7b}
+d <- wide3("7b") %>% filter(scen == "gained") %>% mutate(sub = recode(sub, pseudo = "pseudo-arm", real = "real geometry"), tau = sprintf("%.2f", tau), `arm B / arm A` = sprintf("%d / 64", M_B)) %>% select(sub, `arm B / arm A`, tau, `Proposed (δ)`, `GAM-fs`, DESpace2, `Pseudobulk DE`)
+kable(d, caption = "Table 16. Power (%) at |D| = 0.05 when arm B's abundance is one-third, equal, or three times arm A's (Experiment 7b). The matching null cells (batch3_table.csv) show 3.0–6.5% for the proposed method at every ratio on the pseudo-arm substrate: a 3× abundance change in either direction produces no repositioning call. On real geometry DESpace2 rejects 18–20% of null genes at every ratio (the Null 3B geometry effect, not abundance). The Ackr3-like case — arm B one-third as abundant on real geometry — gives proposed 99.5% / 96%.")
+```
+
+## 9.3 Slice count (Experiment 8)
+
+```{r f8}
+d <- wide3("8") %>% mutate(tau = sprintf("%.2f", tau)) %>% select(tau, `Proposed (δ)`, `GAM-fs`, DESpace2)
+kable(d, col.names = c("τ_θ", mlab[P3]), caption = "Table 17. Power (%) at |D| = 0.05 with k = 20 slices per arm (nominal; comparators' matched values at τ_θ = 0.30: GAM-fs 88%, DESpace2 88%, proposed 91.5%). Parity at ceiling through τ_θ = 0.15.")
+```
+
+## 9.4 The deployed pipeline under mouse correlation (Experiment 9)
+
+```{r f9-fig, fig.height=5, fig.cap="**Figure F2. Type I error (Null 1) under mouse-level correlation**, by σ_mouse (columns; 0.07 = real upper quartile, 0.20 = stress), τ_θ (rows), and mouse-effect distribution. Proposed with and without λ estimated from 300 blank barcodes (M = 16) that share the genes' mouse effects. 200 × 1 gene per point (±3 points); see Table 18 for the 10,000-test recheck at σ = 0.07."}
+d <- e9 %>% filter(scen == "null1") %>% pivot_longer(c(proposed, proposed_lambda, gam_fs, despace2), names_to = "method", values_to = "typeI") %>% lab_m()
+ggplot(d, aes(mkind, typeI, colour = Method, group = Method)) + geom_hline(yintercept = .05, linetype = "dotted") + geom_line(linewidth = .7) + geom_point(size = 2.2) +
+  facet_grid(tau ~ sigma, labeller = label_both) + scale_colour_manual(values = pal) + scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = "mouse-effect distribution", y = "Type I (Null 1)") + thm
+```
+
+```{r f9-table}
+d <- e9 %>% mutate(across(c(proposed, proposed_lambda, gam_fs, despace2), ~pct(.x)), lam = sprintf("%.2f", lam_raw_med), floor = pct(floor_fires, 0), bfp = pct(blank_fp)) %>%
+  transmute(scen, `τ_θ` = sprintf("%.2f", tau), `σ_mouse` = sprintf("%.2f", sigma), mkind, proposed, `proposed + λ` = proposed_lambda, `GAM-fs` = gam_fs, DESpace2 = despace2, `λ_raw median` = lam, `floor fires` = floor, `blank FP` = bfp)
+kable(d, caption = "Table 18. Experiment 9 — rejection (%) at nominal 0.05 and λ diagnostics. Recheck at 50 genes × 200 replicates (proposed, σ_mouse = 0.07, normal): uncorrected 7.9% [6.8, 9.0] / 7.4% [6.6, 8.3] at τ_θ = 0.05 / 0.15; with λ 5.0% [4.5, 5.6] / 4.9% [4.4, 5.4]; λ median 1.05–1.08, floor fires 35%.")
+```
+
+**Reading.** Mouse correlation inflates every spatial method — slice-level pooling, the factor smooth, and the pseudobulk replicates all treat sibling slices as independent. At the **real upper-quartile level** the uncorrected proposed method is the least inflated of the three (7.9% vs GAM-fs 9–14.5%, DESpace2 9.5–11.5%) and λ returns it to 5.0%. At the **stress level** all three run at 10–28% uncorrected, DESpace2 at 44–50% under a single outlying mouse, and λ over-corrects the proposed method to 0–3%. The over-correction has a verified mechanism: blanks and genes share the same mice, so in exactly the replicates where the mouse draw creates a false rejection the 300 blanks are shifted the same way, λ<sub>raw</sub> lands at 2–24 rather than near 1, and the correction overshoots; in benign replicates the floor fires. λ is therefore **adaptive per dataset** — inert without correlation, corrective at the observed level, conservative beyond it, at a power cost (77% → 60% at σ = 0.20). Heavy-tailed mouse effects behave like normal ones; a single 3σ outlier hurts the comparators most and the proposed method least.
+
+## 9.5 Second lineage and non-exponential shapes (Experiments 10 and 11)
+
+```{r f10-11}
+d10 <- wide3("10", meths = c("proposed", "gam_fs")) %>% mutate(tau = sprintf("%.2f", tau)) %>% select(scen, tau, `Proposed (δ)`, `GAM-fs`)
+kable(d10, caption = "Table 19. Fibro 6 substrate (6,246 Day-0 cells, ~484 per slice; NB size 2 per Experiment 0; M = 43 = 64 × the Fibro 6 / Fibro 2 all-panel abundance ratio). Rejection (%) at nominal 0.05, 200 × 1 gene. Recheck at 50 genes × 200 replicates, proposed: 5.2% [4.8, 5.6] at τ_θ = 0.15, 4.9% [4.4, 5.3] at 0.05 — the 9.0% on 200 tests was Monte Carlo noise.")
+d11 <- wide3("11") %>% mutate(shape = recode(shape, local = "localised: 15.5% of mass into r ∈ [0.75, 0.85]", bimodal = "bimodal: 1:3 bumps at r = 0.25 / 0.75")) %>% select(shape, `Proposed (δ)`, `GAM-fs`, DESpace2, `Pseudobulk DE`)
+kable(d11, caption = "Table 20. Power (%) at |D| = 0.05, τ_θ = 0.15, for directional shapes outside the exponential family used to calibrate θ. Power does not depend on the shape family.")
+```
+
+# 10. Integrated interpretation
+
+1. **Does the proposed method control Type I error?** Yes, at every design tested: 4.4–5.1% across four heterogeneity levels at k = 10 and 20 (≈ 10,000 effective tests each); 3.0–6.5% at M = 27 and 331; 5.2% / 4.9% on Fibro 6; 3.0% under population drift; 5.0% under the observed level of mouse correlation once λ is applied.
+2. **Does it control FDR?** Yes — the only method whose realised FDR ≤ stated q natively at both k (3.0% / 4.3% at q = 0.05, 6.9% / 8.8% at q = 0.10), with 85% / 100% of true genes discovered, and 3.6% under correlated gene blocks.
+3. **How does its power compare after fair calibration?** Parity with GAM-fs and DESpace2 at |D| ≥ 0.05 at every heterogeneity level, slice count, abundance, and shape family; DESpace2 lags at |D| = 0.025. The k = 5 GAM-fs edge and τ<sub>θ</sub> = 0.30 reversal were properties of that design.
+4. **What does it answer that comparators do not?** The population-relative directional question, with a signed D and per-arm δ's. Null 3A shows the profile methods cannot ask it (DESpace2 71%); the specificity table shows they answer a broader one (reshaping) by design.
+5. **Genuine limitations:** a narrow, deliberately directional estimand; power floored by slice heterogeneity above M ≈ 64 (62.5% at τ<sub>θ</sub> = 0.30 whatever the abundance); all spatial methods inflate under mouse correlation and λ over-corrects under strong correlation; DESpace2's panel-dependent null is a property of that comparator the benchmark can describe but not repair; pseudobulk cannot serve as a control on real geometry.
+
+**Framing supported by the evidence:** a **confirmatory inferential tool for directional, population-relative repositioning** whose stated error rates are its actual error rates across heterogeneity, replication, abundance, geometry, cell type, and multiplicity, to be paired with a profile method when the goal is broad spatial screening.
+
+# 11. Recommended publication figure set
+
+* **Figure 1 — Framework and estimand** *(schematic)*: population-relative δ; Null 3A "population moves, δ fixed"; the method/hypothesis map (§2).
+* **Figure 2 — Calibration and power**: A1 (Type I vs τ<sub>θ</sub>, both k); B1 (τ<sub>θ</sub> = 0.05 and 0.15 columns suffice in main text); B2 (nominal vs matched).
+* **Figure 3 — Specificity and robustness**: Table 9 as a dot plot; Null 3A with audited-null annotation; F1 (abundance); F2 (mouse correlation, σ = 0.07 column in main text).
+* **Figure 4 — Multiple testing**: E1 (realised FDR vs q, both k) and Table 11 at q = 0.05 as dot-interval; Table 13 as an inset.
+* **Supplementary:** Tables 2–4 (how the design was fixed), the gate attrition table, the QQ plots, Tables 6–7, the full nominal/matched grid, Experiments 7b, 8, 10, 11, Experiment 4B, and the k = 5 results (labelled) with the three findings that did not survive the design correction.
+
+# 12. Manuscript-ready text
+
+## Simulation Methods (draft)
+
+We evaluated the proposed population-relative repositioning statistic by simulation on substrates constructed from real spatial coordinates. The base population comprised 10,211 Day-0 Fibro 2 cells across ten slices from four mice, each cell carrying a normalised radial coordinate \(r \in [0,1]\) (lumen = 0, outer wall = 1). For the primary benchmarks we constructed matched pseudo-arm substrates: two synthetic conditions drawn from this single pooled population, with four pseudo-mice per arm contributing 2, 3, 3 and 2 slices — the observed Day-0 design — at observed slice sizes, cells resampled with replacement, and the entire substrate redrawn in every Monte Carlo replicate. A 20-slice variant (eight pseudo-mice) matched the Day-9 arms. Complementary real-geometry substrates used the observed Day-0 Fibro 2 (ten slices) versus Day-9 IAF 4 (eighteen slices) coordinates unmodified, and a within-slice bootstrap of the real Day-0 slices with arms assigned by mouse.
+
+Gene counts were generated per cell as negative binomial with mean proportional to \(M\,h(r)/\sum h\), \(h(r) = \exp(\theta z(r))\), \(z\) the within-slice standardised coordinate, and \(M = 64\) the observed median gene abundance (blank barcodes: \(M = 16\)). The negative-binomial size was fixed at 1 by a posterior-predictive check matching the real distribution of effective transcript count per slice within 1% at 27, 64 and 331 molecules (size 2 on the Fibro 6 substrate, by the same check). For each scenario \(\theta\) was solved numerically so the expected population-relative displacement δ equalled its target exactly, per arm and substrate. Directional truth followed three patterns — null, gained (0 → θ(D)), reversed (θ(−D/2) → θ(D/2)) — at \(|D| \in \{0.025, 0.05, 0.075\}\). Between-slice heterogeneity was induced by slice-level perturbations \(u_s \sim N(0, \tau_\theta^2)\) at \(\tau_\theta \in \{0, 0.05, 0.15, 0.30\}\), where 0.05 realises the real parent-arm median I² of 14%, 0.15 the upper quartile, and 0.30 lies beyond the real 90th percentile; realised I² from the REML fits is reported with every result. Mouse-level effects \(b_m\) were added at \(\sigma_{\text{mouse}} \in \{0.07, 0.20\}\) — the real upper quartile estimated by three-level REML on the Day-9 arms, and a stress level — under normal, heavy-tailed and single-outlier distributions, with 300 blank barcodes per replicate sharing the genes' mouse effects so that the blank-derived calibration factor λ could be estimated as in the real pipeline. The per-slice eligibility gate, ≥ 30 cells and \(SE_0 < 0.05\), was the same in the simulation and the real analysis.
+
+Comparator implementations were frozen before benchmarking: a hierarchical negative-binomial GAM with an ordered-factor difference smooth, slice factor-smooths and a mouse random effect (mgcv 1.9.4); DESpace2 (DESpace 2.2.2) applied as designed — sample-by-domain pseudobulk with an edgeR quasi-likelihood domain-by-condition test on 50-gene panels with null backgrounds; pseudobulk differential expression as an abundance boundary control; and a cell-level GAM without replicate structure retained solely as a pseudoreplication negative control. A comparator-truth audit classified, for every scenario, which methods' null hypotheses were true, so that rejections by a method whose own null is false are reported as detections rather than errors.
+
+Calibration was established first (two null scenarios × four heterogeneity levels × two slice counts; 50 null genes × 200 replicates per cell, ≈ 10,000 effective null tests with a cluster-robust Monte Carlo error treating the replicate as the cluster). Each comparator's power was then reported at nominal p < 0.05 where it was calibrated at that design and at its own design-specific empirical 5% threshold otherwise, with both tabulated throughout; thresholds learned at one slice count were never applied at another. The programme comprised directional power (24 cells), specificity separating abundance-only change, directional repositioning, and non-directional redistribution with the first moment pinned, a paired ablation of REML–Knapp–Hartung against fixed-effect pooling, a 500-gene mixture (π₀ = 0.8, 100 gained genes at |D| = 0.05, 50 replicates) under Benjamini–Hochberg at both slice counts with native and empirical-null-calibrated p-values and with block-correlated gene effects, and robustness experiments over real geometry with a moment-balanced population-drift null, abundance strata and per-arm abundance change, slice count, mouse correlation with λ, a second cell type, and two directional shapes outside the exponential family.
+
+## Simulation Results (draft)
+
+Across both null scenarios, four heterogeneity levels and two slice counts, the proposed method's Type I error ranged from 4.4% to 5.1% (≈ 10,000 effective tests per cell). The profile comparators were calibrated at low heterogeneity but exceeded nominal at the upper-quartile level (GAM-fs 7.0–7.3%, DESpace2 7.3–7.4%) and beyond it (8.0–8.4% and 11.4–11.6%), and doubling the slice count did not reduce their inflation; the naive cell-level GAM reached 19% and 44%. Rejection rates under a gene positioned identically in both conditions tracked those under a flat gene for every method, confirming that each comparator tests for change rather than for a gradient. Forcing the proposed method's random-effects variance to zero raised its Type I error to 22% at realised I² ≈ 60%, against 4.8% with REML–Knapp–Hartung.
+
+Once every method was held to its own actual 5% threshold, the three spatial methods had equal power for |D| ≥ 0.05 at every heterogeneity level (e.g. 99.5%, 98.5% and 95% at |D| = 0.05, τ<sub>θ</sub> = 0.15; 56.5%, 55% and 58.5% at τ<sub>θ</sub> = 0.30), with DESpace2 alone behind at |D| = 0.025 (60–69% versus 83–89%). Parity persisted at 20 slices per arm, at 27 and 331 molecules per slice, with a three-fold abundance change in either direction, and for localised and bimodal shifts. Above 64 molecules per slice power was floored by heterogeneity rather than lifted by counts (62.5% at τ<sub>θ</sub> = 0.30 whatever the abundance), and DESpace2's Type I inflation grew with abundance (19.5% at 331 molecules).
+
+Specificity results defined the method's boundary. Doubling abundance without movement was detected only by pseudobulk DE (100%; proposed 6.0%). Non-directional redistribution with the first moment pinned at zero was detected by the profile methods (84–100%) while the proposed method remained at 3.5–5.5%. Moving the entire population by +0.20 while holding the gene's population-relative offset fixed produced 3.0% rejection by the proposed method, 6.5% by GAM-fs and 71% by DESpace2 — legitimate detections under the comparators' own hypotheses and precisely the confound the population-relative estimand subtracts. On real Day-0 versus Day-9 geometry every spatial method attained 97.5–100% power at |D| = 0.05.
+
+Under multiplicity, only the proposed method's Benjamini–Hochberg guarantee held as stated: realised FDR 3.0% at 10 slices and 4.3% at 20 slices at q = 0.05, discovering 85% and 100% of true genes, and 3.6% with block-correlated gene effects. GAM-fs ran at 7.7–7.9% natively and returned to 3.5% only after calibration against its empirical null. DESpace2 ran at 19–27% and calibration brought it only to 12–19%, because its null distribution inside a panel containing signal genes differed from its null in an all-null panel (13–19% versus 7% of null genes below p = 0.05) — a property of panel-based dispersion estimation under a mixed panel.
+
+Under mouse-level correlation at the level observed in the real daughter arms, the uncorrected proposed test ran at 7.9% and the blank-derived λ returned it to 5.0%; at a stress level twice the real 90th percentile all spatial methods ran at 10–50% uncorrected and λ over-corrected the proposed method to near zero, because blank barcodes on the same animals track the genes' own mouse draw. On a second, sparser cell type the proposed method was calibrated (5.2%, 4.9%) with power at ceiling.
+
+## Recommended one-paragraph conclusion
+
+Across a pre-registered programme spanning calibration, power, component ablation, specificity, population drift, real tissue geometry, abundance, replication, mouse correlation, a second cell type, non-exponential shapes and multiplicity, the proposed population-relative statistic was the only method whose stated error rates were its actual error rates in every regime tested — Type I error of 4.4–5.1% at all heterogeneity levels and slice counts where profile comparators reached 7–12%, correct null behaviour when the entire cell population moved while the gene's relative position did not, and realised false-discovery rates at or below every stated Benjamini–Hochberg level with 85–100% of true genes discovered at the real study's slice counts. Its power for directional repositioning matched the profile comparators once all methods were held to the same actual Type I error, and it uniquely furnishes a signed, population-relative effect estimate. Its costs are a narrow, deliberately directional estimand, power that is bounded by slice heterogeneity rather than transcript abundance, and a blank-derived calibration that becomes conservative under mouse correlation stronger than the data show. We therefore position the method as the confirmatory inferential tool for directional, population-relative gene repositioning, complementing profile-based methods used for broad spatial screening.
+
+## Limitations revealed by simulation
+
+* **Narrow directional estimand.** Blind to non-directional redistribution by design — pair with a profile method for screening.
+* **Heterogeneity floor.** Above ≈ 64 molecules per slice, power is set by τ² not by counts; at the highest heterogeneity tested (beyond the real 90th percentile) power at |D| = 0.05 is ≈ 60% whatever the abundance.
+* **Mouse correlation.** All spatial methods treat sibling slices as independent and inflate under mouse-level effects; the proposed method least, and its λ is corrective at the observed level but over-conservative at twice the real 90th percentile (power 77% → 60%). A three-level model is the principled alternative where mice are numerous enough to support it.
+* **Matched comparisons are simulation-only devices.** Design-specific thresholds and empirical-null calibration require known truth; they bound, but do not describe, real-data comparator behaviour.
+* **Pseudo-mice are labels.** The matched substrate erases real slice-specific geometry (≈ τ<sub>θ</sub> 0.06 equivalent); real-geometry and bootstrap experiments are the realism checks.
+
+# 13. Audit notes
+
+* **Design corrections and their evidence.** k = 5 → 10 (real Day-0 design; recorded before any k = 10 run; k = 5 results retained as a labelled stress test); NB size 2 → 1 (Experiment 0); τ<sub>θ</sub> reference 0 → 0.05 (Table 3); σ<sub>mouse</sub> 0.20 → 0 reference with 0.07 / 0.20 as levels (Table 4); the real pipeline's gate → SE₀ < 0.05 (§3.2). Each is recorded in the plan (§0a–0c) with the measurement that fixed it.
+* **Findings that did not survive the design correction.** The k = 5 GAM-fs power edge at τ<sub>θ</sub> = 0.15, the k = 5 DESpace2 ranking reversal at 0.30, and the k = 5 FDR discovery shortfall (TPR 5.4%) are all absent at k = 10; the first two are within Monte Carlo error at k = 10 and the third is 85%.
+* **Threshold rule.** c<sub>m,k,τ</sub> and F̂₀ are learned per design from Experiment 1 / 1b (matched substrate, M = 64) and never transferred across k; every other design (real geometry, bootstrap, other M, per-arm M, Fibro 6, mouse effects) uses its own in-batch Null 1 partner cell, and both nominal and matched values are tabulated.
+* **Anomalies traced to mechanism.** λ over-correction under σ<sub>mouse</sub> = 0.20 (blanks share the genes' mouse draw; λ<sub>raw</sub> 2–24 in exactly the falsely-rejecting replicates); pseudobulk's null power on real geometry (dispersion ≈ 130 from 33–2,567-cell slices); DESpace2's panel-dependent null (Table 13). None is a summarisation error.
+* **Monte Carlo resolution.** Calibration cells ≈ 10,000 effective null tests (±0.5 points); power and robustness cells 200 replicates (±3–4 points); the two robustness null cells that read 9–12% on 200 tests were re-run at 10,000 and resolved to 5.0–5.2%.
+* **Environment.** Local calibration stage: R 4.6.1, DESpace 2.4.0. Cluster: conda env `rsim`, R 4.5.3, DESpace 2.2.2 (multi-sample `dsp_test`; any 2.x permitted, 1.x not), mgcv 1.9.4, metafor 5.0.1. Every batch log prints the versions it ran with.
+* **Every number in this document is computed at render time from the frozen result files** (`exp1_*.csv`, `exp1_F0.rds`, `batch2_*.csv`, `batch3_*.csv`, `null_k10.csv`, `tau_i2_k10.csv`, `ppc_neff*.csv`, `sigma_mouse_summary.csv`, `ablB_k10.csv`, `gate_dryrun/*.csv`, and the raw `batch2_out` cells for Figure E1 and Table 13).
+
+# Supplementary
+
+<details><summary><b>Table S1 — complete parameter settings</b></summary>
+
+| Parameter | Value | Source |
+|---|---|---|
+| Substrate pool | 10,211 Day-0 Fibro 2 cells, 10 slices, 4 mice; mean r 0.463, SD 0.128; slice sizes 902–1,232; orientation lumen 0 / outer 1 (verified 26/27 evaluable slices) | `substrate_pool()`, `MANIFEST.md` |
+| Matched arms | 4 pseudo-mice/arm, slices/mouse (2,3,3,2) → 10/arm; k = 20: 8 pseudo-mice; redrawn each replicate | `design_k()` |
+| Real geometry | Day 0 Fibro 2: 10 slices; Day 9 IAF 4: 18 slices, 14,302 cells (33–2,567 per slice) | `make_real_arms()` |
+| Fibro 6 | 6,246 Day-0 cells, ~484/slice; NB size 2; M = 43 | Experiment 0 (Fibro 6) |
+| Counts | NB size 1; μ ∝ M·h/Σh; h = exp(θz); M = 64 (genes), 16 (blanks); strata 27 / 331 | `sim_slice()` |
+| Gate | SE₀ < 0.05 and ≥ 30 cells (simulation AND real pipeline, frozen 2026-09-13) | `pool_arm()`, `delta_core.R` |
+| Pooling | REML + Knapp–Hartung (`metafor::rma`, test = "knha"); contrast on Welch–Satterthwaite t | `pool_arm()`, `d1_test()` |
+| λ | max(1, median(z²)/0.4549); λ = 1 if < 20 usable blanks; 300 blanks/rep sharing the genes' mouse effects | `lambda_of()` |
+| Effect grid | \|D\| ∈ {0.025, 0.05, 0.075}; patterns null / gained / reversed; θ solved per arm and substrate | `solve_theta()` |
+| Heterogeneity | τ<sub>θ</sub> ∈ {0, 0.05, 0.15, 0.30} → realised I² ≈ 0 / 14 / 54 / 84% at k = 10 | Table 3 |
+| σ<sub>mouse</sub> | 0 (reference, measured); 0.07 / 0.20 in Experiment 9; normal / t₃ (variance-matched) / one outlier at 3σ | Table 4, `draw_mouse_effects()` |
+| Null 3A tilt | γ = (25.9, −12.5); mean 0.463 → 0.663; SD preserved; θ = (0.356, 0.398) | `null3A_smoke.rds` |
+| Shapes | localised: π = 0.155 into r ∈ [0.75, 0.85]; bimodal: κ = 19.0, 1:3 bumps at 0.25 / 0.75 | `engine_v16.R` |
+| FDR mixture | G = 500, 100 gained, one substrate/rep, 50 reps; 6b: 25 blocks of 20, ρ = 0.7 | `run_batch2.R`, `run_batch3.R` |
+| Replicates | 200 per cell; null cells 50 genes/rep; MC SE cluster-robust on the replicate | `mc_rate()` |
+| Seeds | L'Ecuyer-CMRG; Exp 1: 20260917 + id; batch 2: 20260918 + id; batch 3: 20260920 + id; local checks 20260913–22 | scripts |
+
+</details>
+
+<details><summary><b>Table S2 — the k = 5 benchmark (v12, NB size 2), retained as a labelled stress test</b></summary>
+
+| result at k = 5 | value | at k = 10 (this report) |
+|---|---|---|
+| proposed Type I, τ<sub>θ</sub> 0 / .15 / .30 | 2.5 / 4.5 / 2.5% (200 tests) | 5.1 / 4.7 / 4.9% (10,000 tests) |
+| GAM-fs matched edge at τ<sub>θ</sub> = .15, \|D\| = .05 | 81.5 vs 73.0% | 98.5 vs 99.5% (parity) |
+| ranking at τ<sub>θ</sub> = .30 | DESpace2 > proposed (0.299 vs 0.276) | tie (58.5 / 56.5 / 55%) |
+| proposed FDR / TPR at q = .05 | 1.1% / 5.4% | 3.0% / 85% |
+| Null 3A proposed | 5.5% | 3.0% |
+| REML+KH vs fixed at I² ≈ 60% | 4.0 vs 21.0% | 4.8 vs 21.9% |
+| λ at σ<sub>mouse</sub> = 0.20 | C0 6.3% → C1 4.5% | uncorrected 18% → λ 0% (over-correction; blanks share the mouse draw) |
+
+</details>

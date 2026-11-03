@@ -1,0 +1,148 @@
+---
+title: "Day0→Day9 Fibroblast — MorphoGAM (three-step) recovery"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(dplyr); library(readr); library(stringr); library(tibble); library(purrr); library(knitr)
+```
+
+MorphoGAM side of the Day0→Day9 fibroblast benchmark. Uses the per-slice `r_for_jsd`
+coordinate CSVs (manual `per_slice_morphogam/`). For every Day0(Healthy)×Day9(DSS9)
+slice pair it builds a directional similarity matrix (rows = Day0 fibro types, cols =
+Day9 fibro/IAF types) via the three-step KDE/JSD engine, and writes per-pair partials +
+a pooled typematrix into `benchmark_out/day0_day9/morphogam/`, in the SAME layout as the
+four alignment methods so the shared scorer compares them identically. Each pair keeps
+its own ≥30-cell type set (per-pair `min_cells`), so the candidate set varies per pair.
+
+```{r config}
+# MorphoGAM coordinate CSVs — MANUAL per_slice_morphogam (user's choice)
+per_slice_xyt_dir <- c(
+  Sys.getenv("COORD_DIR", ""),               # explicit override
+  "../../output_threelayer/per_slice_morphogam",
+  "output_threelayer/per_slice_morphogam"
+) %>% { .[which(nzchar(.) & dir.exists(.))[1]] }
+stopifnot(!is.na(per_slice_xyt_dir))
+out_dir <- c("../../benchmark_out/day0_day9/morphogam",
+             "benchmark_out/day0_day9/morphogam") %>% { .[dir.exists(dirname(dirname(.)))][1] }
+dir.create(file.path(out_dir, "partials"), recursive = TRUE, showWarnings = FALSE)
+
+layers <- c("MU", "SM", "ME")
+CFG <- list(min_cells = 30, bw_mult = 2, bw_floor = 0.05, grid_n = 512,
+            sigma_quantile = 0.5, gamma = 1)
+source("../common/recovery.R")   # GT_DAY0DAY9, score_matrix, recovery_summary
+```
+
+```{r engine}
+read_fibro <- function(slice_id, prefix) {
+  bind_rows(lapply(layers, function(ly) {
+    f <- file.path(per_slice_xyt_dir,
+                   paste0(prefix, "_per_slice_", slice_id, "_", ly, "_xyt_mapped.csv"))
+    if (!file.exists(f)) return(tibble())
+    read_csv(f, show_col_types = FALSE)
+  })) %>%
+    mutate(Slice_ID = as.character(Slice_ID), layer = as.character(layer),
+           Tier1 = as.character(Tier1), Tier2 = as.character(Tier2),
+           r_for_jsd = as.numeric(r_for_jsd)) %>%
+    filter(Slice_ID == slice_id, layer %in% layers,
+           grepl("fibro", Tier1, ignore.case = TRUE),
+           is.finite(r_for_jsd), r_for_jsd >= 0, r_for_jsd <= 1) %>%
+    transmute(layer, Tier2, value = r_for_jsd)
+}
+
+js_dist_kde <- function(x, y, bw, grid_n = 512) {
+  x <- x[is.finite(x)]; y <- y[is.finite(y)]
+  if (length(x) < 2 || length(y) < 2) return(NA_real_)
+  dx <- density(x, bw = bw, from = 0, to = 1, n = grid_n)$y
+  dy <- density(y, bw = bw, from = 0, to = 1, n = grid_n)$y
+  px <- dx / sum(dx); py <- dy / sum(dy); m <- 0.5 * (px + py)
+  kl <- function(p, q) { i <- p > 0 & q > 0; sum(p[i] * log(p[i] / q[i])) }
+  sqrt(0.5 * kl(px, m) + 0.5 * kl(py, m))
+}
+
+# three-step engine (rows = grp A = Day0, cols = grp B = Day9); per-pair min_cells
+three_step <- function(dat, cfg) {
+  A <- dat %>% filter(grp == "A"); B <- dat %>% filter(grp == "B")
+  per_layer <- function(ln) {
+    dA <- A %>% filter(layer == ln); dB <- B %>% filter(layer == ln)
+    rs <- dA %>% count(Tier2, name="n") %>% filter(n >= cfg$min_cells) %>% pull(Tier2)
+    cs <- dB %>% count(Tier2, name="n") %>% filter(n >= cfg$min_cells) %>% pull(Tier2)
+    rs <- sort(rs); cs <- sort(cs)
+    D <- matrix(NA_real_, length(rs), length(cs), dimnames = list(rs, cs))
+    if (!length(rs) || !length(cs)) return(list(S = D))
+    rA <- split(dA$value, dA$Tier2); rB <- split(dB$value, dB$Tier2)
+    bw <- bw.nrd0(c(dA$value, dB$value)) * cfg$bw_mult
+    if (!is.finite(bw) || bw <= 0) bw <- cfg$bw_floor
+    for (i in rs) for (j in cs) D[i, j] <- js_dist_kde(rA[[i]], rB[[j]], bw, cfg$grid_n)
+    sig <- as.numeric(quantile(D, cfg$sigma_quantile, na.rm = TRUE))
+    if (!is.finite(sig) || sig <= 0) sig <- 1
+    list(S = exp(-D / sig))
+  }
+  J <- setNames(lapply(layers, per_layer), layers)
+  ar <- sort(unique(unlist(lapply(J, function(x) rownames(x$S)))))
+  ac <- sort(unique(unlist(lapply(J, function(x) colnames(x$S)))))
+  if (!length(ar) || !length(ac)) return(NULL)
+  Acnt <- A %>% count(layer, Tier2, name="n"); Bcnt <- B %>% count(layer, Tier2, name="n")
+  AcL <- lapply(split(Acnt, Acnt$layer), function(d) setNames(d$n, d$Tier2))
+  BcL <- lapply(split(Bcnt, Bcnt$layer), function(d) setNames(d$n, d$Tier2))
+  Sn <- matrix(0, length(ar), length(ac), dimnames=list(ar, ac)); Sd <- Sn
+  for (ly in layers) {
+    S <- J[[ly]]$S; if (!length(rownames(S)) || !length(colnames(S))) next
+    av <- AcL[[ly]]; bv <- BcL[[ly]]
+    for (i in rownames(S)) for (j in colnames(S)) {
+      s <- S[i,j]; if (!is.finite(s)) next
+      ni <- av[i]; nj <- bv[j]; if (is.na(ni)||is.na(nj)) next
+      w <- sqrt(ni*nj); if (!is.finite(w)||w<=0) next
+      Sn[i,j] <- Sn[i,j] + w*s; Sd[i,j] <- Sd[i,j] + w
+    }
+  }
+  Ss <- Sn/Sd; Ss[Sd==0] <- NA
+  Ap <- Acnt %>% group_by(Tier2) %>% mutate(p=n/sum(n)) %>% ungroup()
+  Bp <- Bcnt %>% group_by(Tier2) %>% mutate(p=n/sum(n)) %>% ungroup()
+  ApT <- lapply(split(Ap, Ap$Tier2), function(d) setNames(d$p, d$layer))
+  BpT <- lapply(split(Bp, Bp$Tier2), function(d) setNames(d$p, d$layer))
+  LO <- matrix(NA_real_, nrow(Ss), ncol(Ss), dimnames=dimnames(Ss))
+  for (i in rownames(Ss)) for (j in colnames(Ss)) {
+    pa <- ApT[[i]]; pb <- BpT[[j]]; tot <- 0
+    for (ly in layers) { va <- pa[ly]; vb <- pb[ly]
+      va <- ifelse(is.na(va),0,va); vb <- ifelse(is.na(vb),0,vb); tot <- tot + sqrt(va*vb) }
+    LO[i,j] <- tot
+  }
+  Ss * (LO ^ cfg$gamma)
+}
+```
+
+```{r pairs}
+day0_slices <- list.files(per_slice_xyt_dir, pattern="^Healthy_all_per_slice_.*_MU_xyt_mapped\\.csv$") %>%
+  str_remove("^Healthy_all_per_slice_") %>% str_remove("_MU_xyt_mapped\\.csv$") %>%
+  unique() %>% { .[str_detect(., "_D0_")] } %>% sort()
+day9_slices <- list.files(per_slice_xyt_dir, pattern="^DSS9_all_per_slice_.*_MU_xyt_mapped\\.csv$") %>%
+  str_remove("^DSS9_all_per_slice_") %>% str_remove("_MU_xyt_mapped\\.csv$") %>%
+  unique() %>% sort()
+d0 <- setNames(lapply(day0_slices, read_fibro, "Healthy_all"), day0_slices)
+d9 <- setNames(lapply(day9_slices, read_fibro, "DSS9_all"), day9_slices)
+cat(sprintf("Day0 %d x Day9 %d = %d pairs\n", length(day0_slices), length(day9_slices),
+            length(day0_slices)*length(day9_slices)))
+
+# unit index matches bench_common.all_units order: for d0 in sorted(day0) for d9 in sorted(day9)
+scored <- list(); idx <- 0
+for (a in day0_slices) for (b in day9_slices) {
+  datp <- bind_rows(d0[[a]] %>% mutate(grp="A"), d9[[b]] %>% mutate(grp="B"))
+  S <- three_step(datp, CFG)
+  if (!is.null(S)) {
+    write.csv(as.data.frame(S),
+              file.path(out_dir, "partials", sprintf("morphogam_Fibroblast_unit%03d.csv", idx)))
+    scored[[length(scored)+1]] <- score_matrix(S) %>% mutate(unit = idx, d0 = a, d9 = b, .before = 1)
+  }
+  idx <- idx + 1
+}
+scored <- bind_rows(scored)
+saveRDS(scored, file.path(out_dir, "morphogam_scored.rds"))
+```
+
+```{r summary}
+summ <- recovery_summary(scored %>% mutate(method = "morphogam"))
+write.csv(summ, file.path(out_dir, "morphogam_recovery_Fibroblast.csv"), row.names = FALSE)
+kable(summ, caption = "MorphoGAM Day0→Day9 fibroblast recovery (pooled over testable slice pairs)")
+```

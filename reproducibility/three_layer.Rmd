@@ -1,0 +1,3648 @@
+---
+title: "threelayer"
+output: html_document
+date: "2026-05-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# test a example
+```{r}
+library(dplyr)
+library(ggplot2)
+library(MorphoGAM)
+library(tidyverse)
+library(tibble)
+library(transport)
+library(readr)
+library(pheatmap)
+
+
+# ============================================================
+# Randomly select one D0 slice and one D9 slice from all_slices
+# and combine them into dat for testing
+# Keep dat looking like the original file: x, y, Mouse_ID, ...
+# ============================================================
+
+library(dplyr)
+library(readr)
+library(stringr)
+library(tibble)
+
+set.seed(56)
+
+slice_dir <- Sys.getenv("ALL_SLICES", "all_slices")   # per-section tables from export_colon_sections.py (run from reproducibility/)
+
+# ------------------------------------------------------------
+# 1. List all CSV slice files
+# ------------------------------------------------------------
+
+slice_files <- list.files(
+  path = slice_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+slice_table <- tibble(
+  file = slice_files,
+  file_name = basename(slice_files)
+) %>%
+  mutate(
+    Sample_type_from_file = case_when(
+      str_detect(file_name, "_D0_") ~ "Healthy",
+      str_detect(file_name, "_D9_") ~ "DSS9",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Sample_type_from_file))
+
+slice_table %>%
+  count(Sample_type_from_file)
+
+# ------------------------------------------------------------
+# 2. Randomly choose one D0 and one D9 slice
+# ------------------------------------------------------------
+
+chosen_D0 <- slice_table %>%
+  filter(Sample_type_from_file == "Healthy") %>%
+  slice_sample(n = 1)
+
+chosen_D9 <- slice_table %>%
+  filter(Sample_type_from_file == "DSS9") %>%
+  slice_sample(n = 1)
+
+chosen_slices <- bind_rows(chosen_D0, chosen_D9)
+
+chosen_slices
+
+# ------------------------------------------------------------
+# 3. Read one slice cleanly
+# ------------------------------------------------------------
+
+read_one_slice_clean <- function(file, sample_type_from_file) {
+  
+  df <- read_csv(file, show_col_types = FALSE)
+  
+  # Remove unnamed index column if present
+  if ("...1" %in% colnames(df)) {
+    df <- df %>%
+      select(-`...1`)
+  }
+  
+  # Ensure sample type and slice ID are correct
+  df %>%
+    mutate(
+      Sample_type = sample_type_from_file,
+      Slice_ID = str_remove(basename(file), "\\.csv$"),
+      source_file = basename(file)
+    )
+}
+
+# ------------------------------------------------------------
+# 4. Combine selected D0 and D9 slices
+# ------------------------------------------------------------
+
+dat <- bind_rows(
+  read_one_slice_clean(chosen_D0$file, chosen_D0$Sample_type_from_file),
+  read_one_slice_clean(chosen_D9$file, chosen_D9$Sample_type_from_file)
+)
+
+# ------------------------------------------------------------
+# 5. Make sure dat has default row numbers, not custom row names
+# ------------------------------------------------------------
+
+dat <- dat %>%
+  as.data.frame()
+
+rownames(dat) <- NULL
+
+# ------------------------------------------------------------
+# 6. Quick checks
+# ------------------------------------------------------------
+
+dat %>%
+  count(Sample_type, Slice_ID)
+
+dat %>%
+  count(Sample_type)
+
+dat %>%
+  count(
+    Sample_type,
+    layer = case_when(
+      grepl("^MU", Leiden_neigh) ~ "MU",
+      grepl("^SM", Leiden_neigh) ~ "SM",
+      grepl("^ME", Leiden_neigh) ~ "ME",
+      TRUE ~ "Other"
+    )
+  )
+
+dat %>%
+  count(Sample_type, Tier1, Tier2) %>%
+  arrange(Sample_type, Tier1, desc(n))
+```
+
+
+# check day0
+```{r}
+dat_day0_layer <- dat %>%
+  filter(Sample_type == "Healthy") %>%
+  mutate(
+    layer = case_when(
+      grepl("^MU", Leiden_neigh) ~ "MU",
+      grepl("^SM", Leiden_neigh) ~ "SM",
+      grepl("^ME", Leiden_neigh) ~ "ME",
+      TRUE ~ "Other"
+    ),
+    layer = factor(layer, levels = c("MU", "SM", "ME", "Other"))
+  )
+
+ggplot(dat_day0_layer, aes(x = x, y = y, color = layer)) +
+  geom_point(size = 0.25, alpha = 0.8) +
+  coord_equal() +
+  theme_void() +
+  labs(
+    title = "Day 0 anatomical layers",
+    color = "Layer"
+  )
+```
+
+## ground truth
+```{r}
+# Fibro 6 distribution across anatomical layers in Healthy state
+fibro6_healthy_layer_dist <- dat_day0_layer %>%
+  filter(Tier2 == "TA") %>%
+  count(layer, name = "n_cells") %>%
+  mutate(
+    prop = n_cells / sum(n_cells)
+  ) %>%
+  arrange(desc(n_cells))
+
+fibro6_healthy_layer_dist
+
+ggplot(fibro6_healthy_layer_dist, aes(x = layer, y = prop, fill = layer)) +
+  geom_col() +
+  theme_bw() +
+  labs(
+    title = "Healthy Fibro 2 distribution across anatomical layers",
+    x = "Anatomical layer",
+    y = "Proportion of Fibro 2 cells"
+  )
+
+# =========================
+# Fibro 6 faceted by anatomical layer
+# =========================
+
+ggplot(dat_day0_layer, aes(x = x, y = y)) +
+  geom_point(
+    color = "grey90",
+    size = 0.15,
+    alpha = 0.35
+  ) +
+  geom_point(
+    data = dat_day0_layer %>% filter(Tier2 == "TA"),
+    aes(color = layer),
+    size = 0.45,
+    alpha = 0.9
+  ) +
+  coord_equal() +
+  facet_wrap(~ layer) +
+  theme_void() +
+  labs(
+    title = "Healthy TA distribution by anatomical layer",
+    color = "Layer"
+  )
+```
+
+
+
+```{r}
+# =========================
+# Make layer variable from Leiden_neigh
+# =========================
+dat_layer <- dat %>%
+  filter(Sample_type == "Healthy") %>%
+  mutate(
+    layer = case_when(
+      grepl("^MU", Leiden_neigh) ~ "MU",
+      grepl("^SM", Leiden_neigh) ~ "SM",
+      grepl("^ME", Leiden_neigh) ~ "ME",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(layer)) %>%
+  mutate(
+    layer = factor(layer, levels = c("MU", "SM", "ME")),
+    Tier2 = as.factor(Tier2)
+  )
+
+# =========================
+# Count Tier2 cell types within each layer
+# =========================
+tier2_layer_counts <- dat_layer %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, desc(n_cells))
+
+write_csv(
+  tier2_layer_counts,
+  file.path(outdir, "Tier2_cell_counts_by_layer_all.csv")
+)
+
+# =========================
+# Keep Tier2 cell types with >30 cells within each layer
+# =========================
+tier2_keep <- tier2_layer_counts %>%
+  filter(n_cells > 30)
+
+write_csv(
+  tier2_keep,
+  file.path(outdir, "Tier2_cell_counts_by_layer_gt30.csv")
+)
+
+dat_layer_gt30 <- dat_layer %>%
+  semi_join(tier2_keep, by = c("layer", "Tier2"))
+
+write_csv(
+  dat_layer_gt30,
+  file.path(outdir, "cells_MU_SM_ME_Tier2_gt30.csv")
+)
+
+# Show kept Tier2 cell types
+tier2_keep
+
+# =========================
+# Plot each layer separately in R Markdown output
+# =========================
+for (ly in c("MU", "SM", "ME")) {
+  
+  dat_one_layer <- dat_layer_gt30 %>%
+    filter(layer == ly)
+  
+  p <- ggplot(dat_one_layer, aes(x = x, y = y, color = Tier2)) +
+    geom_point(size = 0.25, alpha = 0.85) +
+    coord_equal() +
+    theme_void() +
+    labs(
+      title = paste0(ly, ": Tier2 cell types with >30 cells"),
+      color = "Tier2"
+    )
+  
+  print(p)
+}
+```
+
+## apply morphogam
+```{r}
+library(MorphoGAM)
+
+run_curve_layers <- function(dat_use, layers_use, output_name = NULL,
+                             prefix = "Healthy_2", knn = NULL, manual = FALSE,
+                             r_flip = FALSE) {
+  
+  if (is.null(output_name)) {
+    output_name <- paste(layers_use, collapse = "_")
+  }
+  
+  message("Running layers: ", paste(layers_use, collapse = " + "))
+  
+  dat_sub <- dat_use %>%
+    filter(layer %in% layers_use) %>%
+    filter(is.finite(x), is.finite(y))
+  
+  xy <- as.matrix(dat_sub[, c("x", "y")])
+  
+  if (manual) {
+    fit <- CurveFinderInteractive(xy)
+  } else {
+    if (is.null(knn)) {
+      fit <- CurveFinder(xy)
+    } else {
+      fit <- CurveFinder(xy, knn = knn)
+    }
+  }
+  
+  print(fit$curve.plot)
+  print(fit$coordinate.plot)
+  print(fit$residuals.plot)
+  
+  xyt_mapped <- as.data.frame(fit$xyt) %>%
+    bind_cols(
+      dat_sub %>%
+        select(
+          layer,
+          Tier1,
+          Tier2,
+          Tier3,
+          Leiden_neigh,
+          Sample_type,
+          Slice_ID,
+          Cell_ID
+        )
+    ) %>%
+    mutate(
+      r_original = as.numeric(r),
+      r_for_jsd = if (isTRUE(r_flip)) {
+        1 - r_original
+      } else {
+        r_original
+      }
+    )
+  
+  write_csv(
+    xyt_mapped,
+    file.path(outdir, paste0(prefix, "_xyt_mapped_", output_name, ".csv"))
+  )
+  
+  return(list(
+    fit = fit,
+    xyt_mapped = xyt_mapped
+  ))
+}
+
+curve_MU <- run_curve_layers(
+  dat_layer_gt30,
+  layers_use = "MU",
+  output_name = "MU",
+  prefix = "Healthy",
+  manual = FALSE,
+  r_flip = FALSE
+)
+
+curve_SM <- run_curve_layers(
+  dat_layer_gt30,
+  layers_use = "SM",
+  output_name = "SM",
+  prefix = "Healthy",
+  manual = TRUE,
+  r_flip = FALSE
+)
+
+curve_ME <- run_curve_layers(
+  dat_layer_gt30,
+  layers_use = "ME",
+  output_name = "ME",
+  prefix = "Healthy",
+  manual = TRUE,
+  r_flip = FALSE
+)
+```
+
+# check day9
+```{r}
+# =========================
+# DSS9 only: create MU / SM / ME layers
+# =========================
+dat_dss9_layer <- dat %>%
+  filter(Sample_type == "DSS9") %>%
+  mutate(
+    cell_barcode = rownames(.),
+    layer = case_when(
+      grepl("^MU", Leiden_neigh) ~ "MU",
+      grepl("^SM", Leiden_neigh) ~ "SM",
+      grepl("^ME", Leiden_neigh) ~ "ME",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(layer)) %>%
+  mutate(
+    layer = factor(layer, levels = c("MU", "SM", "ME")),
+    Tier2 = as.factor(Tier2)
+  )
+
+# =========================
+# Count Tier2 cell types within each layer
+# Keep Tier2 with >30 cells in that layer
+# =========================
+tier2_dss9_counts <- dat_dss9_layer %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, desc(n_cells))
+
+tier2_dss9_keep <- tier2_dss9_counts %>%
+  filter(n_cells > 30)
+
+dat_dss9_layer_gt30 <- dat_dss9_layer %>%
+  semi_join(tier2_dss9_keep, by = c("layer", "Tier2"))
+
+write_csv(
+  tier2_dss9_counts,
+  file.path(outdir, "DSS9_Tier2_cell_counts_by_layer_all.csv")
+)
+
+write_csv(
+  tier2_dss9_keep,
+  file.path(outdir, "DSS9_Tier2_cell_counts_by_layer_gt30.csv")
+)
+
+write_csv(
+  dat_dss9_layer_gt30,
+  file.path(outdir, "DSS9_cells_MU_SM_ME_Tier2_gt30.csv")
+)
+
+tier2_dss9_keep
+
+# Separate plot for each layer after filtering
+for (ly in c("MU", "SM", "ME")) {
+  
+  p <- dat_dss9_layer_gt30 %>%
+    filter(layer == ly) %>%
+    ggplot(aes(x = x, y = y, color = Tier2)) +
+    geom_point(size = 0.25, alpha = 0.85) +
+    coord_equal() +
+    theme_void() +
+    labs(
+      title = paste0("DSS9 ", ly, ": with >30 cells"),
+      color = "Tier2"
+    )
+  
+  print(p)
+}
+
+# =========================
+# DSS9 anatomical layer plot: MU / SM / ME
+# =========================
+ggplot(dat_dss9_layer, aes(x = x, y = y, color = layer)) +
+  geom_point(size = 0.25, alpha = 0.8) +
+  coord_equal() +
+  theme_void() +
+  labs(
+    title = "DSS9 anatomical layers",
+    color = "Layer"
+  )
+```
+
+## ground truth
+```{r}
+# IAF4 distribution across anatomical layers in DSS9
+iaf4_dss9_layer_dist <- dat_dss9_layer %>%
+  filter(Tier2 == "TA") %>%
+  count(layer, name = "n_cells") %>%
+  mutate(
+    prop = n_cells / sum(n_cells)
+  ) %>%
+  arrange(desc(n_cells))
+
+iaf4_dss9_layer_dist
+
+ggplot(iaf4_dss9_layer_dist, aes(x = layer, y = prop, fill = layer)) +
+  geom_col() +
+  theme_bw() +
+  labs(
+    title = "DSS9 IAF4 distribution across anatomical layers",
+    x = "Anatomical layer",
+    y = "Proportion of IAF4 cells"
+  )
+
+# =========================
+# IAF4 faceted by anatomical layer
+# =========================
+
+ggplot(dat_dss9_layer, aes(x = x, y = y)) +
+  geom_point(
+    color = "grey90",
+    size = 0.15,
+    alpha = 0.35
+  ) +
+  geom_point(
+    data = dat_dss9_layer %>% filter(Tier2 == "TA"),
+    aes(color = layer),
+    size = 0.45,
+    alpha = 0.9
+  ) +
+  coord_equal() +
+  facet_wrap(~ layer) +
+  theme_void() +
+  labs(
+    title = "DSS9 IAF 4 distribution by anatomical layer",
+    color = "Layer"
+  )
+```
+
+## apply morphogam
+```{r}
+run_curve_one_layer <- function(dat_use, layer_name, knn = NULL, manual = FALSE,
+                                r_flip = FALSE) {
+  
+  message("Running layer: ", layer_name)
+  
+  dat_sub <- dat_use %>%
+    filter(layer == layer_name) %>%
+    filter(is.finite(x), is.finite(y))
+  
+  xy <- as.matrix(dat_sub[, c("x", "y")])
+  
+  if (manual) {
+    fit <- CurveFinderInteractive(xy)
+  } else {
+    if (is.null(knn)) {
+      fit <- CurveFinder(xy)
+    } else {
+      fit <- CurveFinder(xy, knn = knn)
+    }
+  }
+  
+  print(fit$curve.plot)
+  print(fit$coordinate.plot)
+  print(fit$residuals.plot)
+  
+  xyt_mapped <- as.data.frame(fit$xyt) %>%
+    bind_cols(
+      dat_sub %>%
+        select(
+          cell_barcode,
+          layer,
+          Tier1,
+          Tier2,
+          Tier3,
+          Leiden_neigh,
+          Sample_type,
+          Slice_ID,
+          Cell_ID
+        )
+    ) %>%
+    mutate(
+      r_original = as.numeric(r),
+      r_for_jsd = if (isTRUE(r_flip)) {
+        1 - r_original
+      } else {
+        r_original
+      }
+    )
+  
+  write_csv(
+    xyt_mapped,
+    file.path(outdir, paste0("DSS9_xyt_mapped_", layer_name, ".csv"))
+  )
+  
+  return(list(
+    fit = fit,
+    xyt_mapped = xyt_mapped
+  ))
+}
+
+curve_DSS9_MU <- run_curve_one_layer(
+  dat_dss9_layer_gt30,
+  "MU",
+  manual = TRUE,
+  r_flip = FALSE
+)
+
+curve_DSS9_SM <- run_curve_one_layer(
+  dat_dss9_layer_gt30,
+  "SM",
+  knn = 50,
+  r_flip = FALSE
+)
+
+curve_DSS9_ME <- run_curve_one_layer(
+  dat_dss9_layer_gt30,
+  "ME",
+  knn = 50,
+  r_flip = TRUE
+)
+```
+
+# Spatial similarity
+## Step 1. Compute layer-specific spatial similarity
+```{r}
+# ============================================================
+# Helper functions for KDE-based Jensen-Shannon distance
+# ============================================================
+
+clean_xyt <- function(df, coord = "r_for_jsd") {
+  
+  df %>%
+    transmute(
+      Tier2 = as.character(Tier2),
+      value = as.numeric(.data[[coord]])
+    ) %>%
+    filter(
+      !is.na(Tier2),
+      is.finite(value),
+      value >= 0,
+      value <= 1
+    )
+}
+
+js_dist_kde <- function(x, y, n = 512, bw) {
+  
+  x <- x[is.finite(x) & x >= 0 & x <= 1]
+  y <- y[is.finite(y) & y >= 0 & y <= 1]
+  
+  if (length(x) < 2 || length(y) < 2) {
+    return(NA_real_)
+  }
+  
+  denx <- density(x, from = 0, to = 1, n = n, bw = bw)
+  deny <- density(y, from = 0, to = 1, n = n, bw = bw)
+  
+  dx <- denx$x[2] - denx$x[1]
+  
+  px <- denx$y * dx
+  py <- deny$y * dx
+  
+  px <- px / sum(px)
+  py <- py / sum(py)
+  
+  m <- 0.5 * (px + py)
+  
+  eps <- 1e-12
+  
+  kl <- function(a, b) {
+    sum(a * log((a + eps) / (b + eps)))
+  }
+  
+  js <- 0.5 * kl(px, m) + 0.5 * kl(py, m)
+  
+  sqrt(js)
+}
+# ============================================================
+# Step 1. Compute layer-specific spatial similarity
+# ============================================================
+# Rationale:
+# MU, SM, and ME are fitted separately in MorphoGAM, so their
+# residual coordinates r_MU, r_SM, and r_ME should not be pooled.
+#
+# Therefore, spatial similarity is computed only within matched
+# anatomical layers:
+#   Healthy MU vs DSS9 MU
+#   Healthy SM vs DSS9 SM
+#   Healthy ME vs DSS9 ME
+#
+# For each layer, KDE-based Jensen-Shannon divergence is computed
+# on the MorphoGAM coordinate r_for_jsd, and then converted to
+# a similarity score:
+#   S_l,ij = exp(-D_l,ij / sigma_l)
+# ============================================================
+
+compute_same_layer_jsd <- function(layer_name, coord = "r_for_jsd",
+                                   plot_heatmap = TRUE) {
+  
+  message("Computing Healthy ", layer_name, " vs DSS9 ", layer_name,
+          " using ", coord)
+  
+  healthy_file <- file.path(outdir, paste0("Healthy_xyt_mapped_", layer_name, ".csv"))
+  dss9_file    <- file.path(outdir, paste0("DSS9_xyt_mapped_", layer_name, ".csv"))
+  
+  d0 <- read_csv(healthy_file, show_col_types = FALSE) %>%
+    clean_xyt(coord = coord)
+  
+  d9 <- read_csv(dss9_file, show_col_types = FALSE) %>%
+    clean_xyt(coord = coord)
+  
+  rows <- sort(unique(d0$Tier2))
+  cols <- sort(unique(d9$Tier2))
+  
+  r0_list <- split(d0$value, d0$Tier2)
+  r9_list <- split(d9$value, d9$Tier2)
+  
+  bw_global <- bw.nrd0(c(d0$value, d9$value))
+  
+  if (!is.finite(bw_global) || bw_global <= 0) {
+    bw_global <- 0.05
+  }
+  
+  D <- matrix(
+    NA_real_,
+    nrow = length(rows),
+    ncol = length(cols),
+    dimnames = list(rows, cols)
+  )
+  
+  for (i in seq_along(rows)) {
+    for (j in seq_along(cols)) {
+      D[i, j] <- js_dist_kde(
+        r0_list[[rows[i]]],
+        r9_list[[cols[j]]],
+        bw = bw_global
+      )
+    }
+  }
+  
+  sigma <- as.numeric(quantile(D, 0.5, na.rm = TRUE))
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- mean(D[is.finite(D)], na.rm = TRUE)
+  }
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- 1
+  }
+  
+  S <- exp(-D / sigma)
+  
+  write_csv(
+    as.data.frame(D) %>%
+      rownames_to_column("Healthy_Tier2"),
+    file.path(outdir, paste0("Healthy_vs_DSS9_", layer_name, "_", coord, "_JSD_distance.csv"))
+  )
+  
+  write_csv(
+    as.data.frame(S) %>%
+      rownames_to_column("Healthy_Tier2"),
+    file.path(outdir, paste0("Healthy_vs_DSS9_", layer_name, "_", coord, "_JSD_similarity.csv"))
+  )
+  
+  finite_vals <- S[is.finite(S)]
+  
+  if (plot_heatmap && length(unique(round(finite_vals, 8))) > 1) {
+    pheatmap(
+      S,
+      cluster_rows = FALSE,
+      cluster_cols = FALSE,
+      main = paste0("Healthy vs DSS9 ", layer_name, " spatial similarity using ", coord),
+      fontsize_row = 7,
+      fontsize_col = 7
+    )
+  } else {
+    message("Skipping heatmap for ", layer_name,
+            ": similarity matrix has too few unique finite values.")
+  }
+  
+  return(list(
+    D = D,
+    S = S,
+    bw_global = bw_global,
+    sigma = sigma,
+    coord = coord,
+    layer = layer_name
+  ))
+}
+
+jsd_MU <- compute_same_layer_jsd("MU", coord = "r_for_jsd")
+jsd_SM <- compute_same_layer_jsd("SM", coord = "r_for_jsd")
+jsd_ME <- compute_same_layer_jsd("ME", coord = "r_for_jsd")
+```
+
+## Step 2. Cell-count-weighted summary of valid within-layer similarities
+
+```{r}
+# ============================================================
+# Step 2. Cell-count-weighted summary of valid layer-specific similarities
+# ============================================================
+# Rationale:
+# The layer-specific similarities S_l,ij are valid because each was
+# computed within a matched layer-specific coordinate system.
+#
+# Here, we summarize those layer-specific similarities using
+# cell-count weights:
+#
+#   w_l,ij = sqrt(n^Healthy_l,i * n^DSS9_l,j)
+#
+#   S_summary_ij =
+#       sum_l w_l,ij * S_l,ij / sum_l w_l,ij
+#
+# Important interpretation:
+# This is a weighted summary of valid within-layer similarities.
+# It is NOT a formal spatial distance on one pooled coordinate space.
+# ============================================================
+
+jsd_list <- list(
+  MU = jsd_MU,
+  SM = jsd_SM,
+  ME = jsd_ME
+)
+
+layers <- c("MU", "SM", "ME")
+
+# ------------------------------------------------------------
+# Counts used for weighting Step 2
+# These are from the MorphoGAM xyt files, i.e. the same filtered
+# cells used to compute layer-specific spatial similarity.
+# ------------------------------------------------------------
+
+get_xyt_counts <- function(layer_name, prefix) {
+  
+  read_csv(
+    file.path(outdir, paste0(prefix, "_xyt_mapped_", layer_name, ".csv")),
+    show_col_types = FALSE
+  ) %>%
+    mutate(
+      Tier2 = as.character(Tier2),
+      layer = as.character(layer)
+    ) %>%
+    filter(!is.na(Tier2), layer == layer_name) %>%
+    count(Tier2, name = "n") %>%
+    mutate(layer = layer_name)
+}
+
+healthy_xyt_counts_all <- bind_rows(
+  get_xyt_counts("MU", "Healthy"),
+  get_xyt_counts("SM", "Healthy"),
+  get_xyt_counts("ME", "Healthy")
+)
+
+dss9_xyt_counts_all <- bind_rows(
+  get_xyt_counts("MU", "DSS9"),
+  get_xyt_counts("SM", "DSS9"),
+  get_xyt_counts("ME", "DSS9")
+)
+
+# ------------------------------------------------------------
+# Initialize matrices
+# ------------------------------------------------------------
+
+all_rows <- sort(unique(unlist(lapply(jsd_list, function(x) rownames(x$S)))))
+all_cols <- sort(unique(unlist(lapply(jsd_list, function(x) colnames(x$S)))))
+
+S_num_count <- matrix(
+  0,
+  nrow = length(all_rows),
+  ncol = length(all_cols),
+  dimnames = list(all_rows, all_cols)
+)
+
+S_den_count <- matrix(
+  0,
+  nrow = length(all_rows),
+  ncol = length(all_cols),
+  dimnames = list(all_rows, all_cols)
+)
+
+layer_coverage_count <- matrix(
+  0,
+  nrow = length(all_rows),
+  ncol = length(all_cols),
+  dimnames = list(all_rows, all_cols)
+)
+
+cell_weight_sum <- matrix(
+  0,
+  nrow = length(all_rows),
+  ncol = length(all_cols),
+  dimnames = list(all_rows, all_cols)
+)
+
+# ------------------------------------------------------------
+# Weighted summary across MU / SM / ME
+# ------------------------------------------------------------
+
+for (ly in layers) {
+  
+  S_layer <- jsd_list[[ly]]$S
+  
+  n0_layer <- healthy_xyt_counts_all %>%
+    filter(layer == ly)
+  
+  n9_layer <- dss9_xyt_counts_all %>%
+    filter(layer == ly)
+  
+  for (i in rownames(S_layer)) {
+    for (j in colnames(S_layer)) {
+      
+      sij <- S_layer[i, j]
+      if (!is.finite(sij)) next
+      
+      n_i <- n0_layer %>%
+        filter(Tier2 == i) %>%
+        pull(n)
+      
+      n_j <- n9_layer %>%
+        filter(Tier2 == j) %>%
+        pull(n)
+      
+      if (length(n_i) == 0 || length(n_j) == 0) next
+      
+      w <- sqrt(n_i * n_j)
+      if (!is.finite(w) || w <= 0) next
+      
+      S_num_count[i, j] <- S_num_count[i, j] + w * sij
+      S_den_count[i, j] <- S_den_count[i, j] + w
+      layer_coverage_count[i, j] <- layer_coverage_count[i, j] + 1
+      cell_weight_sum[i, j] <- cell_weight_sum[i, j] + w
+    }
+  }
+}
+
+S_summary_count <- S_num_count / S_den_count
+S_summary_count[S_den_count == 0] <- NA
+```
+
+## Step 3. Anatomical mixture correction using unfiltered layer proportions
+
+```{r}
+# ============================================================
+# Step 3. Correct for anatomical mixture compatibility
+# using filtered MorphoGAM-retained cells
+# ============================================================
+# Rationale:
+# A cell type is not only a distribution along r_l within each
+# layer. It is also a mixture over anatomical layers:
+#
+#   P_i(l, r_l) = p_i,l * P_i,l(r_l)
+#
+# Here, p_i,l is computed from the same filtered xyt_mapped files
+# used in Step 1 and Step 2. These xyt_mapped files should already
+# reflect the >30 cells per Tier2-per-layer filtering.
+#
+# Therefore, Step 3 uses the same analysis universe as the spatial
+# similarity calculation.
+#
+# Layer-distribution overlap:
+#
+#   O_ij = sum_l sqrt(p^Healthy_l,i * p^DSS9_l,j)
+#
+# Optional sharpening:
+#
+#   O^gamma_ij = O_ij^gamma
+#
+# where:
+#   gamma = 1   means no sharpening
+#   gamma > 1   penalizes partial layer-distribution mismatch more strongly
+#
+# Final composite score:
+#
+#   S_final_ij = S_summary_ij * O^gamma_ij
+#
+# This is a mixture-aware composite similarity index, not a pure
+# pooled-space JSD distance.
+# ============================================================
+
+# ------------------------------------------------------------
+# Choose sharpening strength
+# ------------------------------------------------------------
+# gamma = 1: no sharpening, original Bhattacharyya overlap
+# gamma = 1.5: mild sharpening
+# gamma = 2: moderate sharpening
+# gamma = 3: strong sharpening
+
+gamma <- 1
+
+layers <- c("MU", "SM", "ME")
+
+# ------------------------------------------------------------
+# Read filtered Healthy and DSS9 xyt_mapped files
+# ------------------------------------------------------------
+# These files are expected to come from:
+#   dat_layer_gt30
+#   dat_dss9_layer_gt30
+#
+# Therefore, they already reflect the >30 cells per Tier2-per-layer
+# filtering used before MorphoGAM.
+# ------------------------------------------------------------
+
+read_filtered_xyt <- function(prefix) {
+  
+  bind_rows(
+    read_csv(
+      file.path(outdir, paste0(prefix, "_xyt_mapped_MU.csv")),
+      show_col_types = FALSE
+    ),
+    read_csv(
+      file.path(outdir, paste0(prefix, "_xyt_mapped_SM.csv")),
+      show_col_types = FALSE
+    ),
+    read_csv(
+      file.path(outdir, paste0(prefix, "_xyt_mapped_ME.csv")),
+      show_col_types = FALSE
+    )
+  ) %>%
+    mutate(
+      Tier1 = as.character(Tier1),
+      Tier2 = as.character(Tier2),
+      layer = as.character(layer)
+    ) %>%
+    filter(
+      !is.na(Tier2),
+      !is.na(layer),
+      layer %in% layers
+    )
+}
+
+healthy_xyt_filtered <- read_filtered_xyt("Healthy")
+dss9_xyt_filtered    <- read_filtered_xyt("DSS9")
+
+# ------------------------------------------------------------
+# Optional verification: check minimum cells per retained layer
+# ------------------------------------------------------------
+# This lets you confirm that the retained layer-cell-type combinations
+# are indeed mostly >30 cells.
+# ------------------------------------------------------------
+
+healthy_filtered_counts_check <- healthy_xyt_filtered %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, n_cells)
+
+dss9_filtered_counts_check <- dss9_xyt_filtered %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, n_cells)
+
+healthy_filtered_counts_check %>%
+  summarise(
+    min_n_cells = min(n_cells),
+    n_layer_tier2_combinations = n()
+  )
+
+dss9_filtered_counts_check %>%
+  summarise(
+    min_n_cells = min(n_cells),
+    n_layer_tier2_combinations = n()
+  )
+
+# ------------------------------------------------------------
+# Compute filtered layer proportions p_l,i
+# ------------------------------------------------------------
+# For each Tier2 cell type, proportions are calculated across
+# retained MU / SM / ME layers:
+#
+#   p_l,i = n_l,i / sum_l n_l,i
+#
+# Because this uses filtered xyt_mapped files, rare layer appearances
+# dropped before MorphoGAM are not included.
+# ------------------------------------------------------------
+
+get_filtered_layer_props <- function(df) {
+  
+  df %>%
+    count(Tier2, layer, name = "n") %>%
+    group_by(Tier2) %>%
+    mutate(
+      total_n = sum(n),
+      p = n / total_n
+    ) %>%
+    ungroup() %>%
+    select(Tier2, layer, n, total_n, p)
+}
+
+healthy_layer_props <- get_filtered_layer_props(healthy_xyt_filtered)
+dss9_layer_props    <- get_filtered_layer_props(dss9_xyt_filtered)
+
+write_csv(
+  healthy_layer_props,
+  file.path(outdir, "Healthy_filtered_Tier2_layer_proportions_gt30.csv")
+)
+
+write_csv(
+  dss9_layer_props,
+  file.path(outdir, "DSS9_filtered_Tier2_layer_proportions_gt30.csv")
+)
+
+# ------------------------------------------------------------
+# Compute layer-distribution overlap O_ij
+# ------------------------------------------------------------
+# layer_distribution_overlap:
+#   original Bhattacharyya overlap, between 0 and 1
+#
+# layer_distribution_overlap_gamma:
+#   sharpened overlap, O_ij^gamma
+# ------------------------------------------------------------
+
+layer_distribution_overlap <- matrix(
+  NA_real_,
+  nrow = nrow(S_summary_count),
+  ncol = ncol(S_summary_count),
+  dimnames = dimnames(S_summary_count)
+)
+
+for (i in rownames(S_summary_count)) {
+  for (j in colnames(S_summary_count)) {
+    
+    pi <- healthy_layer_props %>%
+      filter(Tier2 == i) %>%
+      select(layer, p_i = p)
+    
+    pj <- dss9_layer_props %>%
+      filter(Tier2 == j) %>%
+      select(layer, p_j = p)
+    
+    pp <- full_join(pi, pj, by = "layer") %>%
+      mutate(
+        p_i = tidyr::replace_na(p_i, 0),
+        p_j = tidyr::replace_na(p_j, 0)
+      )
+    
+    layer_distribution_overlap[i, j] <- sum(sqrt(pp$p_i * pp$p_j))
+  }
+}
+
+# Apply optional sharpening
+layer_distribution_overlap_gamma <- layer_distribution_overlap ^ gamma
+
+# ------------------------------------------------------------
+# Final mixture-aware composite similarity
+# ------------------------------------------------------------
+# If gamma = 1:
+#   S_final_mixture_aware = S_summary_count * layer_distribution_overlap
+#
+# If gamma > 1:
+#   partial layer-composition mismatch is penalized more strongly.
+# ------------------------------------------------------------
+
+S_final_mixture_aware <- S_summary_count * layer_distribution_overlap_gamma
+
+# ------------------------------------------------------------
+# Save outputs
+# ------------------------------------------------------------
+
+write_csv(
+  as.data.frame(S_summary_count) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step2_weighted_summary_similarity.csv")
+)
+
+write_csv(
+  as.data.frame(layer_distribution_overlap) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step3_layer_distribution_overlap_filtered_gt30.csv")
+)
+
+write_csv(
+  as.data.frame(layer_distribution_overlap_gamma) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(
+    outdir,
+    paste0("Healthy_vs_DSS9_step3_layer_distribution_overlap_filtered_gt30_gamma_", gamma, ".csv")
+  )
+)
+
+write_csv(
+  as.data.frame(S_final_mixture_aware) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(
+    outdir,
+    paste0("Healthy_vs_DSS9_final_mixture_aware_filtered_gt30_gamma_", gamma, ".csv")
+  )
+)
+```
+
+## Reorder rows and columns by Tier1 class
+
+```{r}
+# ============================================================
+# Reorder rows and columns by Tier1 class
+# ============================================================
+# Rows are Healthy Tier2 cell types.
+# Columns are DSS9 Tier2 cell types.
+#
+# Tier1 labels are assigned by majority vote across the cells used
+# in the MorphoGAM xyt files.
+# ============================================================
+
+read_all_xyt <- function(prefix) {
+  bind_rows(
+    read_csv(file.path(outdir, paste0(prefix, "_xyt_mapped_MU.csv")), show_col_types = FALSE),
+    read_csv(file.path(outdir, paste0(prefix, "_xyt_mapped_SM.csv")), show_col_types = FALSE),
+    read_csv(file.path(outdir, paste0(prefix, "_xyt_mapped_ME.csv")), show_col_types = FALSE)
+  ) %>%
+    mutate(
+      Tier1 = as.character(Tier1),
+      Tier2 = as.character(Tier2)
+    ) %>%
+    filter(!is.na(Tier1), !is.na(Tier2))
+}
+
+healthy_xyt_all <- read_all_xyt("Healthy")
+dss9_xyt_all    <- read_all_xyt("DSS9")
+
+tier1_order <- bind_rows(
+  healthy_xyt_all %>% select(Tier1),
+  dss9_xyt_all %>% select(Tier1)
+) %>%
+  distinct(Tier1) %>%
+  pull(Tier1)
+
+healthy_tier_map <- healthy_xyt_all %>%
+  count(Tier2, Tier1, name = "n") %>%
+  group_by(Tier2) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(Tier2, Tier1)
+
+dss9_tier_map <- dss9_xyt_all %>%
+  count(Tier2, Tier1, name = "n") %>%
+  group_by(Tier2) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(Tier2, Tier1)
+
+row_order <- healthy_tier_map %>%
+  filter(Tier2 %in% rownames(S_final_mixture_aware)) %>%
+  mutate(Tier1 = factor(Tier1, levels = tier1_order)) %>%
+  arrange(Tier1, Tier2) %>%
+  pull(Tier2)
+
+col_order <- dss9_tier_map %>%
+  filter(Tier2 %in% colnames(S_final_mixture_aware)) %>%
+  mutate(Tier1 = factor(Tier1, levels = tier1_order)) %>%
+  arrange(Tier1, Tier2) %>%
+  pull(Tier2)
+
+row_order <- c(row_order, setdiff(rownames(S_final_mixture_aware), row_order))
+col_order <- c(col_order, setdiff(colnames(S_final_mixture_aware), col_order))
+
+S_summary_count_ordered <- S_summary_count[
+  row_order,
+  col_order,
+  drop = FALSE
+]
+
+cell_weight_sum_ordered <- cell_weight_sum[
+  row_order,
+  col_order,
+  drop = FALSE
+]
+
+layer_coverage_count_ordered <- layer_coverage_count[
+  row_order,
+  col_order,
+  drop = FALSE
+]
+
+layer_distribution_overlap_ordered <- layer_distribution_overlap[
+  row_order,
+  col_order,
+  drop = FALSE
+]
+
+S_final_mixture_aware_ordered <- S_final_mixture_aware[
+  row_order,
+  col_order,
+  drop = FALSE
+]
+
+write_csv(
+  as.data.frame(S_summary_count_ordered) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step2_weighted_summary_similarity_Tier1_ordered.csv")
+)
+
+write_csv(
+  as.data.frame(layer_distribution_overlap_ordered) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step3_layer_distribution_overlap_unfiltered_Tier1_ordered.csv")
+)
+
+write_csv(
+  as.data.frame(S_final_mixture_aware_ordered) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_final_mixture_aware_similarity_Tier1_ordered.csv")
+)
+
+write_csv(
+  as.data.frame(cell_weight_sum_ordered) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step2_total_cell_weight_Tier1_ordered.csv")
+)
+
+write_csv(
+  as.data.frame(layer_coverage_count_ordered) %>%
+    rownames_to_column("Healthy_Tier2"),
+  file.path(outdir, "Healthy_vs_DSS9_step2_layer_coverage_Tier1_ordered.csv")
+)
+```
+
+## Publication-style heatmap for final mixture-aware similarity
+
+```{r}
+# ============================================================
+# Publication-style heatmap
+# ============================================================
+# The heatmap displays the final mixture-aware composite similarity.
+# Tier2 labels remain visible, while Tier1 annotations are shown as
+# row and column color bars.
+# ============================================================
+
+library(RColorBrewer)
+
+row_annotation <- healthy_tier_map %>%
+  filter(Tier2 %in% rownames(S_final_mixture_aware_ordered)) %>%
+  distinct(Tier2, Tier1) %>%
+  tibble::column_to_rownames("Tier2")
+
+row_annotation <- row_annotation[
+  rownames(S_final_mixture_aware_ordered),
+  ,
+  drop = FALSE
+]
+
+col_annotation <- dss9_tier_map %>%
+  filter(Tier2 %in% colnames(S_final_mixture_aware_ordered)) %>%
+  distinct(Tier2, Tier1) %>%
+  tibble::column_to_rownames("Tier2")
+
+col_annotation <- col_annotation[
+  colnames(S_final_mixture_aware_ordered),
+  ,
+  drop = FALSE
+]
+
+all_tier1 <- unique(c(row_annotation$Tier1, col_annotation$Tier1))
+
+tier1_palette <- colorRampPalette(
+  brewer.pal(min(8, max(3, length(all_tier1))), "Set2")
+)(length(all_tier1))
+
+tier1_colors <- setNames(tier1_palette, all_tier1)
+
+annotation_colors <- list(
+  Tier1 = tier1_colors
+)
+
+get_gaps <- function(annotation_df) {
+  tier1_vec <- as.character(annotation_df$Tier1)
+  which(tier1_vec[-1] != tier1_vec[-length(tier1_vec)])
+}
+
+row_gaps <- get_gaps(row_annotation)
+col_gaps <- get_gaps(col_annotation)
+
+heat_cols <- colorRampPalette(c("white", "gold", "red"))(100)
+
+pheatmap(
+  S_final_mixture_aware_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = row_annotation,
+  annotation_col = col_annotation,
+  annotation_colors = annotation_colors,
+  gaps_row = row_gaps,
+  gaps_col = col_gaps,
+  color = heat_cols,
+  border_color = NA,
+  main = "Mixture-aware Healthy vs DSS9 spatial similarity",
+  fontsize_row = 6,
+  fontsize_col = 6,
+  angle_col = 45,
+  annotation_names_row = TRUE,
+  annotation_names_col = TRUE
+)
+```
+
+## Optional QC heatmaps
+
+```{r}
+# ============================================================
+# Optional QC 1: Step 2 weighted summary only
+# ============================================================
+
+pheatmap(
+  S_summary_count_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = row_annotation,
+  annotation_col = col_annotation,
+  annotation_colors = annotation_colors,
+  gaps_row = row_gaps,
+  gaps_col = col_gaps,
+  color = heat_cols,
+  border_color = NA,
+  main = "Step 2 only: weighted summary of within-layer similarities",
+  fontsize_row = 6,
+  fontsize_col = 6,
+  angle_col = 45,
+  annotation_names_row = TRUE,
+  annotation_names_col = TRUE
+)
+
+# ============================================================
+# Optional QC 2: Step 3 layer-distribution overlap only
+# ============================================================
+
+overlap_cols <- colorRampPalette(c("white", "skyblue", "navy"))(100)
+
+pheatmap(
+  layer_distribution_overlap_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = row_annotation,
+  annotation_col = col_annotation,
+  annotation_colors = annotation_colors,
+  gaps_row = row_gaps,
+  gaps_col = col_gaps,
+  color = overlap_cols,
+  border_color = NA,
+  main = "Step 3 only: anatomical layer-distribution overlap",
+  fontsize_row = 6,
+  fontsize_col = 6,
+  angle_col = 45,
+  annotation_names_row = TRUE,
+  annotation_names_col = TRUE
+)
+```
+
+## Check known fibroblast transitions
+
+```{r}
+# ============================================================
+# Check known / expected fibroblast transitions
+# ============================================================
+# Based on the paper:
+#   Fibro 2 -> IAF 4
+#   Fibro 6 -> IAF 2 / IAF 3
+#   Fibro 7 -> Fibro 4
+#
+# Here we report:
+#   1. Step 2 weighted-summary similarity
+#   2. Step 3 layer-distribution overlap
+#   3. Final mixture-aware similarity
+#   4. Rank among all DSS9 Tier2 cell types
+# ============================================================
+
+ground_truth_pairs <- tibble::tribble(
+  ~Healthy_Tier2, ~DSS9_Tier2,
+  "Fibro 2",      "IAF 4",
+  "Fibro 6",      "IAF 2",
+  "Fibro 6",      "IAF 3",
+  "Fibro 7",      "Fibro 4"
+)
+
+pull_matrix_value <- function(mat, row_name, col_name) {
+  if (row_name %in% rownames(mat) && col_name %in% colnames(mat)) {
+    as.numeric(mat[row_name, col_name])
+  } else {
+    NA_real_
+  }
+}
+
+get_rank_for_pair <- function(healthy_tier2, dss9_tier2, S_mat) {
+  
+  if (!(healthy_tier2 %in% rownames(S_mat))) return(NA_real_)
+  
+  rank_table <- tibble(
+    DSS9_Tier2 = colnames(S_mat),
+    similarity = as.numeric(S_mat[healthy_tier2, ])
+  ) %>%
+    filter(is.finite(similarity)) %>%
+    arrange(desc(similarity)) %>%
+    mutate(rank = row_number())
+  
+  out <- rank_table %>%
+    filter(DSS9_Tier2 == dss9_tier2)
+  
+  if (nrow(out) == 0) NA_real_ else out$rank[1]
+}
+
+ground_truth_mixture_check <- ground_truth_pairs %>%
+  rowwise() %>%
+  mutate(
+    step2_weighted_summary_similarity = pull_matrix_value(
+      S_summary_count_ordered,
+      Healthy_Tier2,
+      DSS9_Tier2
+    ),
+    step3_layer_distribution_overlap = pull_matrix_value(
+      layer_distribution_overlap_ordered,
+      Healthy_Tier2,
+      DSS9_Tier2
+    ),
+    final_mixture_aware_similarity = pull_matrix_value(
+      S_final_mixture_aware_ordered,
+      Healthy_Tier2,
+      DSS9_Tier2
+    ),
+    total_cell_weight = pull_matrix_value(
+      cell_weight_sum_ordered,
+      Healthy_Tier2,
+      DSS9_Tier2
+    ),
+    layer_coverage = pull_matrix_value(
+      layer_coverage_count_ordered,
+      Healthy_Tier2,
+      DSS9_Tier2
+    ),
+    rank_among_DSS9_final = get_rank_for_pair(
+      Healthy_Tier2,
+      DSS9_Tier2,
+      S_final_mixture_aware_ordered
+    ),
+    rank_among_DSS9_step2_only = get_rank_for_pair(
+      Healthy_Tier2,
+      DSS9_Tier2,
+      S_summary_count_ordered
+    )
+  ) %>%
+  ungroup()
+
+ground_truth_mixture_check
+
+write_csv(
+  ground_truth_mixture_check,
+  file.path(outdir, "ground_truth_mixture_aware_check.csv")
+)
+```
+
+# Benchmarking
+## Day0 vs Day0 benchmark
+
+```{r}
+# ============================================================
+# Day0 vs Day0 benchmark
+# ============================================================
+# Goal:
+# Test whether the mixture-aware spatial similarity method can
+# recover self-matches after splitting Healthy Day0 cells into
+# two pseudo-replicates.
+#
+# Important:
+# This benchmark uses Healthy_xyt_mapped_MU/SM/ME.csv.
+# These files should already come from the >30 cells per
+# Tier2-per-layer filtered data used for MorphoGAM.
+#
+# Benchmark logic:
+#   1. Split Healthy cells into Day0_A and Day0_B.
+#   2. Compute layer-specific JSD similarity within MU / SM / ME.
+#   3. Summarize layer-specific similarities using cell-count weights.
+#   4. Apply layer-distribution overlap correction.
+#   5. Check whether each Day0_A Tier2 best matches the same Day0_B Tier2.
+# ============================================================
+
+set.seed(123)
+
+layers <- c("MU", "SM", "ME")
+min_cells <- 30
+gamma_day0 <- 1   # gamma = 1 no sharpening; gamma = 2 sharper layer-overlap penalty
+
+# ============================================================
+# 1. Read Healthy MorphoGAM-mapped cells
+# ============================================================
+
+read_xyt_layers <- function(prefix, layers = c("MU", "SM", "ME")) {
+  
+  bind_rows(lapply(layers, function(ly) {
+    read_csv(
+      file.path(outdir, paste0(prefix, "_xyt_mapped_", ly, ".csv")),
+      show_col_types = FALSE
+    )
+  })) %>%
+    mutate(
+      layer = as.character(layer),
+      Tier1 = as.character(Tier1),
+      Tier2 = as.character(Tier2),
+      r_for_jsd = as.numeric(r_for_jsd)
+    ) %>%
+    filter(
+      layer %in% layers,
+      !is.na(Tier1),
+      !is.na(Tier2),
+      is.finite(r_for_jsd),
+      r_for_jsd >= 0,
+      r_for_jsd <= 1
+    )
+}
+
+healthy_xyt_benchmark <- read_xyt_layers("Healthy", layers)
+
+# Optional check: confirm retained layer-Tier2 combinations are >30
+healthy_xyt_benchmark %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  summarise(
+    min_n_cells = min(n_cells),
+    n_layer_tier2_combinations = n()
+  )
+
+# ============================================================
+# 2. Split Healthy Day0 into two pseudo-replicates
+# ============================================================
+# Prefer splitting by Slice_ID if multiple slices are available.
+# If only one slice is available, use random cell split.
+# ============================================================
+
+if ("Slice_ID" %in% colnames(healthy_xyt_benchmark) &&
+    length(unique(healthy_xyt_benchmark$Slice_ID)) >= 2) {
+  
+  slice_split <- tibble(
+    Slice_ID = unique(healthy_xyt_benchmark$Slice_ID),
+    benchmark_group = sample(
+      rep(c("Day0_A", "Day0_B"),
+          length.out = length(unique(healthy_xyt_benchmark$Slice_ID)))
+    )
+  )
+  
+  healthy_xyt_benchmark <- healthy_xyt_benchmark %>%
+    left_join(slice_split, by = "Slice_ID")
+  
+} else {
+  
+  healthy_xyt_benchmark <- healthy_xyt_benchmark %>%
+    mutate(
+      benchmark_group = sample(
+        c("Day0_A", "Day0_B"),
+        size = n(),
+        replace = TRUE
+      )
+    )
+}
+
+table(healthy_xyt_benchmark$benchmark_group)
+
+# ============================================================
+# 3. Layer-specific JSD similarity: Day0_A vs Day0_B
+# ============================================================
+
+compute_benchmark_layer_jsd <- function(layer_name,
+                                        coord = "r_for_jsd",
+                                        min_cells = 30,
+                                        plot_heatmap = FALSE) {
+  
+  message("Computing Day0_A vs Day0_B for layer: ", layer_name)
+  
+  dA <- healthy_xyt_benchmark %>%
+    filter(layer == layer_name, benchmark_group == "Day0_A") %>%
+    clean_xyt(coord = coord)
+  
+  dB <- healthy_xyt_benchmark %>%
+    filter(layer == layer_name, benchmark_group == "Day0_B") %>%
+    clean_xyt(coord = coord)
+  
+  keep_A <- dA %>%
+    count(Tier2, name = "n_A") %>%
+    filter(n_A > min_cells)
+  
+  keep_B <- dB %>%
+    count(Tier2, name = "n_B") %>%
+    filter(n_B > min_cells)
+  
+  dA <- dA %>% semi_join(keep_A, by = "Tier2")
+  dB <- dB %>% semi_join(keep_B, by = "Tier2")
+  
+  rows <- sort(unique(dA$Tier2))
+  cols <- sort(unique(dB$Tier2))
+  
+  rA_list <- split(dA$value, dA$Tier2)
+  rB_list <- split(dB$value, dB$Tier2)
+  
+  bw_global <- bw.nrd0(c(dA$value, dB$value))
+  
+  if (!is.finite(bw_global) || bw_global <= 0) {
+    bw_global <- 0.05
+  }
+  
+  D <- matrix(
+    NA_real_,
+    nrow = length(rows),
+    ncol = length(cols),
+    dimnames = list(rows, cols)
+  )
+  
+  for (i in seq_along(rows)) {
+    for (j in seq_along(cols)) {
+      D[i, j] <- js_dist_kde(
+        rA_list[[rows[i]]],
+        rB_list[[cols[j]]],
+        bw = bw_global
+      )
+    }
+  }
+  
+  sigma <- as.numeric(quantile(D, 0.5, na.rm = TRUE))
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- mean(D[is.finite(D)], na.rm = TRUE)
+  }
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- 1
+  }
+  
+  S <- exp(-D / sigma)
+  
+  if (plot_heatmap) {
+    finite_vals <- S[is.finite(S)]
+    
+    if (length(unique(round(finite_vals, 8))) > 1) {
+      pheatmap(
+        S,
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+        main = paste0("Day0_A vs Day0_B ", layer_name, " spatial similarity"),
+        fontsize_row = 7,
+        fontsize_col = 7
+      )
+    }
+  }
+  
+  list(
+    D = D,
+    S = S,
+    bw_global = bw_global,
+    sigma = sigma,
+    layer = layer_name
+  )
+}
+
+day0_jsd_list <- setNames(
+  lapply(layers, function(ly) {
+    compute_benchmark_layer_jsd(
+      layer_name = ly,
+      coord = "r_for_jsd",
+      min_cells = min_cells,
+      plot_heatmap = FALSE
+    )
+  }),
+  layers
+)
+
+# ============================================================
+# 4. Step 2: cell-count weighted summary across layers
+# ============================================================
+
+get_benchmark_counts <- function(group_name) {
+  
+  healthy_xyt_benchmark %>%
+    filter(benchmark_group == group_name) %>%
+    count(layer, Tier2, name = "n") %>%
+    mutate(
+      layer = as.character(layer),
+      Tier2 = as.character(Tier2)
+    )
+}
+
+day0_A_counts <- get_benchmark_counts("Day0_A")
+day0_B_counts <- get_benchmark_counts("Day0_B")
+
+all_rows_day0 <- sort(unique(unlist(lapply(day0_jsd_list, function(x) rownames(x$S)))))
+all_cols_day0 <- sort(unique(unlist(lapply(day0_jsd_list, function(x) colnames(x$S)))))
+
+S_num_day0 <- matrix(
+  0,
+  nrow = length(all_rows_day0),
+  ncol = length(all_cols_day0),
+  dimnames = list(all_rows_day0, all_cols_day0)
+)
+
+S_den_day0 <- matrix(
+  0,
+  nrow = length(all_rows_day0),
+  ncol = length(all_cols_day0),
+  dimnames = list(all_rows_day0, all_cols_day0)
+)
+
+layer_coverage_day0 <- matrix(
+  0,
+  nrow = length(all_rows_day0),
+  ncol = length(all_cols_day0),
+  dimnames = list(all_rows_day0, all_cols_day0)
+)
+
+cell_weight_sum_day0 <- matrix(
+  0,
+  nrow = length(all_rows_day0),
+  ncol = length(all_cols_day0),
+  dimnames = list(all_rows_day0, all_cols_day0)
+)
+
+for (ly in layers) {
+  
+  S_layer <- day0_jsd_list[[ly]]$S
+  
+  nA_layer <- day0_A_counts %>% filter(layer == ly)
+  nB_layer <- day0_B_counts %>% filter(layer == ly)
+  
+  for (i in rownames(S_layer)) {
+    for (j in colnames(S_layer)) {
+      
+      sij <- S_layer[i, j]
+      if (!is.finite(sij)) next
+      
+      n_i <- nA_layer %>% filter(Tier2 == i) %>% pull(n)
+      n_j <- nB_layer %>% filter(Tier2 == j) %>% pull(n)
+      
+      if (length(n_i) == 0 || length(n_j) == 0) next
+      
+      w <- sqrt(n_i * n_j)
+      if (!is.finite(w) || w <= 0) next
+      
+      S_num_day0[i, j] <- S_num_day0[i, j] + w * sij
+      S_den_day0[i, j] <- S_den_day0[i, j] + w
+      layer_coverage_day0[i, j] <- layer_coverage_day0[i, j] + 1
+      cell_weight_sum_day0[i, j] <- cell_weight_sum_day0[i, j] + w
+    }
+  }
+}
+
+S_day0_summary <- S_num_day0 / S_den_day0
+S_day0_summary[S_den_day0 == 0] <- NA
+
+# ============================================================
+# 5. Step 3: anatomical layer-distribution overlap
+# ============================================================
+
+get_layer_props <- function(count_df) {
+  
+  count_df %>%
+    group_by(Tier2) %>%
+    mutate(
+      total_n = sum(n),
+      p = n / total_n
+    ) %>%
+    ungroup() %>%
+    select(Tier2, layer, n, total_n, p)
+}
+
+day0_A_layer_props <- get_layer_props(day0_A_counts)
+day0_B_layer_props <- get_layer_props(day0_B_counts)
+
+layer_distribution_overlap_day0 <- matrix(
+  NA_real_,
+  nrow = nrow(S_day0_summary),
+  ncol = ncol(S_day0_summary),
+  dimnames = dimnames(S_day0_summary)
+)
+
+for (i in rownames(S_day0_summary)) {
+  for (j in colnames(S_day0_summary)) {
+    
+    pi <- day0_A_layer_props %>%
+      filter(Tier2 == i) %>%
+      select(layer, p_i = p)
+    
+    pj <- day0_B_layer_props %>%
+      filter(Tier2 == j) %>%
+      select(layer, p_j = p)
+    
+    pp <- full_join(pi, pj, by = "layer") %>%
+      mutate(
+        p_i = tidyr::replace_na(p_i, 0),
+        p_j = tidyr::replace_na(p_j, 0)
+      )
+    
+    layer_distribution_overlap_day0[i, j] <- sum(sqrt(pp$p_i * pp$p_j))
+  }
+}
+
+layer_distribution_overlap_day0_gamma <- layer_distribution_overlap_day0 ^ gamma_day0
+
+S_day0_final_mixture_aware <- S_day0_summary * layer_distribution_overlap_day0_gamma
+
+# ============================================================
+# 6. Reorder by Tier1 class
+# ============================================================
+
+make_tier_map <- function(group_name) {
+  
+  healthy_xyt_benchmark %>%
+    filter(benchmark_group == group_name) %>%
+    count(Tier2, Tier1, name = "n") %>%
+    group_by(Tier2) %>%
+    slice_max(n, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(Tier2, Tier1)
+}
+
+tier_map_A_day0 <- make_tier_map("Day0_A")
+tier_map_B_day0 <- make_tier_map("Day0_B")
+
+tier1_order_day0 <- bind_rows(
+  tier_map_A_day0 %>% select(Tier1),
+  tier_map_B_day0 %>% select(Tier1)
+) %>%
+  distinct(Tier1) %>%
+  pull(Tier1)
+
+row_order_day0 <- tier_map_A_day0 %>%
+  filter(Tier2 %in% rownames(S_day0_final_mixture_aware)) %>%
+  mutate(Tier1 = factor(Tier1, levels = tier1_order_day0)) %>%
+  arrange(Tier1, Tier2) %>%
+  pull(Tier2)
+
+col_order_day0 <- tier_map_B_day0 %>%
+  filter(Tier2 %in% colnames(S_day0_final_mixture_aware)) %>%
+  mutate(Tier1 = factor(Tier1, levels = tier1_order_day0)) %>%
+  arrange(Tier1, Tier2) %>%
+  pull(Tier2)
+
+row_order_day0 <- c(row_order_day0, setdiff(rownames(S_day0_final_mixture_aware), row_order_day0))
+col_order_day0 <- c(col_order_day0, setdiff(colnames(S_day0_final_mixture_aware), col_order_day0))
+
+order_day0_matrix <- function(mat) {
+  mat[row_order_day0, col_order_day0, drop = FALSE]
+}
+
+S_day0_summary_ordered <- order_day0_matrix(S_day0_summary)
+layer_distribution_overlap_day0_ordered <- order_day0_matrix(layer_distribution_overlap_day0)
+S_day0_final_mixture_aware_ordered <- order_day0_matrix(S_day0_final_mixture_aware)
+cell_weight_sum_day0_ordered <- order_day0_matrix(cell_weight_sum_day0)
+layer_coverage_day0_ordered <- order_day0_matrix(layer_coverage_day0)
+
+# ============================================================
+# 7. Plot Day0-vs-Day0 heatmap
+# ============================================================
+
+row_annotation_day0 <- tier_map_A_day0 %>%
+  filter(Tier2 %in% rownames(S_day0_final_mixture_aware_ordered)) %>%
+  distinct(Tier2, Tier1) %>%
+  tibble::column_to_rownames("Tier2")
+
+row_annotation_day0 <- row_annotation_day0[
+  rownames(S_day0_final_mixture_aware_ordered),
+  ,
+  drop = FALSE
+]
+
+col_annotation_day0 <- tier_map_B_day0 %>%
+  filter(Tier2 %in% colnames(S_day0_final_mixture_aware_ordered)) %>%
+  distinct(Tier2, Tier1) %>%
+  tibble::column_to_rownames("Tier2")
+
+col_annotation_day0 <- col_annotation_day0[
+  colnames(S_day0_final_mixture_aware_ordered),
+  ,
+  drop = FALSE
+]
+
+all_tier1_day0 <- unique(c(row_annotation_day0$Tier1, col_annotation_day0$Tier1))
+
+tier1_palette_day0 <- colorRampPalette(
+  brewer.pal(min(8, max(3, length(all_tier1_day0))), "Set2")
+)(length(all_tier1_day0))
+
+annotation_colors_day0 <- list(
+  Tier1 = setNames(tier1_palette_day0, all_tier1_day0)
+)
+
+get_gaps <- function(annotation_df) {
+  tier1_vec <- as.character(annotation_df$Tier1)
+  which(tier1_vec[-1] != tier1_vec[-length(tier1_vec)])
+}
+
+row_gaps_day0 <- get_gaps(row_annotation_day0)
+col_gaps_day0 <- get_gaps(col_annotation_day0)
+
+heat_cols <- colorRampPalette(c("white", "gold", "red"))(100)
+
+pheatmap(
+  S_day0_final_mixture_aware_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = row_annotation_day0,
+  annotation_col = col_annotation_day0,
+  annotation_colors = annotation_colors_day0,
+  gaps_row = row_gaps_day0,
+  gaps_col = col_gaps_day0,
+  color = heat_cols,
+  border_color = NA,
+  main = paste0("Day0 vs Day0 benchmark: final mixture-aware similarity, gamma = ", gamma_day0),
+  fontsize_row = 6,
+  fontsize_col = 6,
+  angle_col = 45,
+  annotation_names_row = TRUE,
+  annotation_names_col = TRUE
+)
+
+# ============================================================
+# 8. Self-match diagnostics
+# ============================================================
+
+get_self_match_benchmark <- function(S_mat) {
+  
+  bind_rows(lapply(rownames(S_mat), function(i) {
+    
+    vals <- S_mat[i, ]
+    
+    rank_table <- tibble(
+      Day0_B_Tier2 = colnames(S_mat),
+      similarity = as.numeric(vals)
+    ) %>%
+      filter(is.finite(similarity)) %>%
+      arrange(desc(similarity)) %>%
+      mutate(rank = row_number())
+    
+    self_row <- rank_table %>%
+      filter(Day0_B_Tier2 == i)
+    
+    tibble(
+      Day0_A_Tier2 = i,
+      top_Day0_B_Tier2 = rank_table$Day0_B_Tier2[1],
+      top_similarity = rank_table$similarity[1],
+      self_similarity = if (nrow(self_row) == 0) NA_real_ else self_row$similarity[1],
+      self_rank = if (nrow(self_row) == 0) NA_integer_ else self_row$rank[1],
+      self_is_top1 = if (nrow(self_row) == 0) FALSE else self_row$rank[1] == 1
+    )
+  }))
+}
+
+day0_self_match_benchmark <- get_self_match_benchmark(
+  S_day0_final_mixture_aware_ordered
+)
+
+day0_self_match_benchmark %>%
+  arrange(self_rank, desc(self_similarity))
+
+benchmark_summary <- day0_self_match_benchmark %>%
+  summarise(
+    n_cell_types = n(),
+    n_self_top1 = sum(self_is_top1, na.rm = TRUE),
+    prop_self_top1 = mean(self_is_top1, na.rm = TRUE),
+    median_self_rank = median(self_rank, na.rm = TRUE),
+    mean_self_similarity = mean(self_similarity, na.rm = TRUE)
+  )
+
+benchmark_summary
+```
+```{r}
+# ============================================================
+# Crypt base-to-tip epithelial lineage sanity check
+# ============================================================
+# Biological expectation:
+#   Stem cells -> TA -> Colonocytes
+#
+# Spatial expectation:
+#   crypt base: Stem cells, Goblet 1
+#   intermediate: TA
+#   crypt tip: Colonocytes, Goblet 2
+#
+# This table checks whether expected self-matches and nearby
+# crypt-axis relationships are recovered in the Day0-vs-Day0
+# benchmark.
+# ============================================================
+
+crypt_lineage_pairs <- tibble::tribble(
+  ~Day0_A_Tier2, ~Day0_B_Tier2, ~expected_relationship,
+  "Stem cells",  "Stem cells",  "self-match; crypt base",
+  "TA",          "TA",          "self-match; transit-amplifying",
+  "Colonocytes", "Colonocytes", "self-match; crypt tip / mature epithelial",
+  "Goblet 1",    "Goblet 1",    "self-match; crypt base-associated",
+  "Goblet 2",    "Goblet 2",    "self-match; crypt tip-associated",
+  
+  "Stem cells",  "TA",          "adjacent along crypt base-to-tip axis",
+  "TA",          "Colonocytes", "adjacent along crypt base-to-tip axis",
+  "Stem cells",  "Colonocytes", "same lineage but farther apart",
+  
+  "Goblet 1",    "Stem cells",  "both crypt-base associated",
+  "Goblet 1",    "TA",          "base-to-intermediate relationship",
+  "Goblet 2",    "Colonocytes", "both crypt-tip associated",
+  "Goblet 2",    "TA",          "tip-to-intermediate relationship"
+)
+
+pull_matrix_value <- function(mat, row_name, col_name) {
+  if (row_name %in% rownames(mat) && col_name %in% colnames(mat)) {
+    as.numeric(mat[row_name, col_name])
+  } else {
+    NA_real_
+  }
+}
+
+get_rank_for_pair_day0 <- function(day0_A_tier2, day0_B_tier2, S_mat) {
+  
+  if (!(day0_A_tier2 %in% rownames(S_mat))) {
+    return(NA_real_)
+  }
+  
+  rank_table <- tibble(
+    Day0_B_Tier2 = colnames(S_mat),
+    similarity = as.numeric(S_mat[day0_A_tier2, ])
+  ) %>%
+    filter(is.finite(similarity)) %>%
+    arrange(desc(similarity)) %>%
+    mutate(rank = row_number())
+  
+  out <- rank_table %>%
+    filter(Day0_B_Tier2 == day0_B_tier2)
+  
+  if (nrow(out) == 0) NA_real_ else out$rank[1]
+}
+
+get_top_matches_day0 <- function(day0_A_tier2, S_mat, top_n = 5) {
+  
+  if (!(day0_A_tier2 %in% rownames(S_mat))) {
+    return(NA_character_)
+  }
+  
+  tibble(
+    Day0_B_Tier2 = colnames(S_mat),
+    similarity = as.numeric(S_mat[day0_A_tier2, ])
+  ) %>%
+    filter(is.finite(similarity)) %>%
+    arrange(desc(similarity)) %>%
+    slice_head(n = top_n) %>%
+    mutate(label = paste0(Day0_B_Tier2, " (", round(similarity, 3), ")")) %>%
+    pull(label) %>%
+    paste(collapse = "; ")
+}
+
+crypt_lineage_sanity_check <- crypt_lineage_pairs %>%
+  rowwise() %>%
+  mutate(
+    step2_weighted_summary_similarity = pull_matrix_value(
+      S_day0_summary_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    layer_distribution_overlap = pull_matrix_value(
+      layer_distribution_overlap_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    final_mixture_aware_similarity = pull_matrix_value(
+      S_day0_final_mixture_aware_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    rank_among_Day0_B = get_rank_for_pair_day0(
+      Day0_A_Tier2,
+      Day0_B_Tier2,
+      S_day0_final_mixture_aware_ordered
+    ),
+    top5_Day0_B_matches_for_Day0_A = get_top_matches_day0(
+      Day0_A_Tier2,
+      S_day0_final_mixture_aware_ordered,
+      top_n = 5
+    )
+  ) %>%
+  ungroup()
+
+crypt_lineage_sanity_check
+```
+
+```{r}
+
+# ============================================================
+# Step 3-only heatmap: Day0 vs Day0 anatomical layer overlap
+# ============================================================
+# This heatmap shows only the anatomical layer-distribution overlap:
+#
+#   O_ij = sum_l sqrt(p^Day0_A_l,i * p^Day0_B_l,j)
+#
+# It does NOT include MorphoGAM r-distribution similarity.
+# If epithelial cells are all in the same broad layer, such as MU,
+# their overlap will be 1 and Step 3 will not distinguish them.
+# ============================================================
+
+step3_cols <- colorRampPalette(c("white", "skyblue", "navy"))(100)
+
+pheatmap(
+  layer_distribution_overlap_day0_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_row = row_annotation_day0,
+  annotation_col = col_annotation_day0,
+  annotation_colors = annotation_colors_day0,
+  gaps_row = row_gaps_day0,
+  gaps_col = col_gaps_day0,
+  color = step3_cols,
+  border_color = NA,
+  main = "Day0 vs Day0 benchmark: Step 3 only, layer-distribution overlap",
+  fontsize_row = 6,
+  fontsize_col = 6,
+  angle_col = 45,
+  annotation_names_row = TRUE,
+  annotation_names_col = TRUE
+)
+```
+
+## Epi
+```{r}
+# ============================================================
+# Epi: Day0 vs Day0 epithelial-only benchmark
+# Revised version:
+#   1. Uses epithelial Tier1 only
+#   2. Uses stratified split within layer × Tier2
+#   3. Uses lower post-split threshold because input xyt files
+#      were already filtered before MorphoGAM
+#   4. Shows heatmap numbers
+#   5. Reports ground-truth rank as rank / total candidates
+# ============================================================
+
+library(dplyr)
+library(tibble)
+library(readr)
+library(pheatmap)
+library(RColorBrewer)
+
+set.seed(123)
+
+# ============================================================
+# Fine-tuning parameters
+# ============================================================
+
+layers <- c("MU", "SM", "ME")
+
+# Because xyt files were already generated after >30 layer-Tier2 filtering,
+# use a lower threshold after splitting into pseudo-replicates.
+min_cells_epi <- 15
+
+gamma_epi_day0 <- 1
+
+use_only_MU_for_epi <- FALSE
+
+if (use_only_MU_for_epi) {
+  layers_epi <- "MU"
+} else {
+  layers_epi <- layers
+}
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+safe_pheatmap <- function(mat,
+                          main,
+                          color,
+                          show_numbers = TRUE,
+                          number_format = "%.2f",
+                          fontsize_number = 7,
+                          cellwidth = 38,
+                          cellheight = 28,
+                          ...) {
+  
+  finite_vals <- mat[is.finite(mat)]
+  
+  if (length(finite_vals) == 0) {
+    message("Skipping heatmap: ", main, " has no finite values.")
+    return(NULL)
+  }
+  
+  if (length(unique(round(finite_vals, 8))) < 2) {
+    message(
+      "Skipping heatmap: ", main,
+      " has only one unique finite value: ",
+      unique(round(finite_vals, 8))[1]
+    )
+    return(NULL)
+  }
+  
+  pheatmap(
+    mat,
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    color = color,
+    border_color = NA,
+    main = main,
+    display_numbers = show_numbers,
+    number_format = number_format,
+    fontsize_number = fontsize_number,
+    cellwidth = cellwidth,
+    cellheight = cellheight,
+    ...
+  )
+}
+
+is_epithelial_tier1 <- function(x) {
+  grepl("epi", x, ignore.case = TRUE)
+}
+
+expected_epi_order <- c(
+  "Stem cells",
+  "TA",
+  "Colonocytes",
+  "Goblet 1",
+  "Goblet 2",
+  "EEC",
+  "M cells",
+  "Clu+ epithelia",
+  "IAE1",
+  "IAE2",
+  "IAE3",
+  "Repair-associated"
+)
+
+order_epi_matrix <- function(mat) {
+  
+  row_order <- c(
+    intersect(expected_epi_order, rownames(mat)),
+    setdiff(rownames(mat), expected_epi_order)
+  )
+  
+  col_order <- c(
+    intersect(expected_epi_order, colnames(mat)),
+    setdiff(colnames(mat), expected_epi_order)
+  )
+  
+  mat[row_order, col_order, drop = FALSE]
+}
+
+pull_matrix_value_epi <- function(mat, row_name, col_name) {
+  if (row_name %in% rownames(mat) && col_name %in% colnames(mat)) {
+    as.numeric(mat[row_name, col_name])
+  } else {
+    NA_real_
+  }
+}
+
+get_rank_for_pair_epi <- function(row_name, col_name, S_mat) {
+  
+  if (!(row_name %in% rownames(S_mat))) {
+    return(NA_real_)
+  }
+  
+  rank_table <- tibble(
+    Day0_B_Tier2 = colnames(S_mat),
+    similarity = as.numeric(S_mat[row_name, ])
+  ) %>%
+    filter(is.finite(similarity)) %>%
+    arrange(desc(similarity)) %>%
+    mutate(rank = row_number())
+  
+  out <- rank_table %>%
+    filter(Day0_B_Tier2 == col_name)
+  
+  if (nrow(out) == 0) NA_real_ else out$rank[1]
+}
+
+get_top_matches_epi <- function(row_name, S_mat, top_n = 5) {
+  
+  if (!(row_name %in% rownames(S_mat))) {
+    return(NA_character_)
+  }
+  
+  tibble(
+    Day0_B_Tier2 = colnames(S_mat),
+    similarity = as.numeric(S_mat[row_name, ])
+  ) %>%
+    filter(is.finite(similarity)) %>%
+    arrange(desc(similarity)) %>%
+    slice_head(n = top_n) %>%
+    mutate(label = paste0(Day0_B_Tier2, " (", round(similarity, 3), ")")) %>%
+    pull(label) %>%
+    paste(collapse = "; ")
+}
+
+get_epi_layer_props <- function(count_df) {
+  
+  count_df %>%
+    group_by(Tier2) %>%
+    mutate(
+      total_n = sum(n),
+      p = n / total_n
+    ) %>%
+    ungroup() %>%
+    select(Tier2, layer, n, total_n, p)
+}
+
+# ============================================================
+# 1. Read Healthy MorphoGAM-mapped cells and keep epithelial only
+# ============================================================
+
+read_xyt_layers_epi <- function(prefix, layers = c("MU", "SM", "ME")) {
+  
+  bind_rows(lapply(layers, function(ly) {
+    read_csv(
+      file.path(outdir, paste0(prefix, "_xyt_mapped_", ly, ".csv")),
+      show_col_types = FALSE
+    )
+  })) %>%
+    mutate(
+      layer = as.character(layer),
+      Tier1 = as.character(Tier1),
+      Tier2 = as.character(Tier2),
+      r_for_jsd = as.numeric(r_for_jsd)
+    ) %>%
+    filter(
+      layer %in% layers,
+      !is.na(Tier1),
+      !is.na(Tier2),
+      is_epithelial_tier1(Tier1),
+      is.finite(r_for_jsd),
+      r_for_jsd >= 0,
+      r_for_jsd <= 1
+    )
+}
+
+healthy_epi_benchmark <- read_xyt_layers_epi("Healthy", layers_epi)
+
+healthy_epi_benchmark %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, desc(n_cells))
+
+healthy_epi_benchmark %>%
+  count(Tier2, name = "total_cells") %>%
+  arrange(desc(total_cells))
+
+# ============================================================
+# 2. Stratified split within layer × Tier2
+# ============================================================
+# This creates balanced Day0_A and Day0_B pseudo-replicates
+# for each retained layer-cell type combination.
+# ============================================================
+
+healthy_epi_benchmark <- healthy_epi_benchmark %>%
+  group_by(layer, Tier2) %>%
+  mutate(
+    benchmark_group = sample(
+      rep(c("Day0_A", "Day0_B"), length.out = n())
+    )
+  ) %>%
+  ungroup()
+
+table(healthy_epi_benchmark$benchmark_group)
+
+healthy_epi_benchmark %>%
+  count(layer, Tier2, benchmark_group, name = "n_cells") %>%
+  arrange(layer, Tier2, benchmark_group)
+
+# ============================================================
+# 3. Step 1: Layer-specific JSD similarity
+# ============================================================
+
+compute_epi_benchmark_layer_jsd <- function(layer_name,
+                                            coord = "r_for_jsd",
+                                            min_cells = 15,
+                                            plot_heatmap = TRUE) {
+  
+  message("Computing epithelial Day0_A vs Day0_B for layer: ", layer_name)
+  
+  dA <- healthy_epi_benchmark %>%
+    filter(layer == layer_name, benchmark_group == "Day0_A") %>%
+    clean_xyt(coord = coord)
+  
+  dB <- healthy_epi_benchmark %>%
+    filter(layer == layer_name, benchmark_group == "Day0_B") %>%
+    clean_xyt(coord = coord)
+  
+  keep_A <- dA %>%
+    count(Tier2, name = "n_A") %>%
+    filter(n_A >= min_cells)
+  
+  keep_B <- dB %>%
+    count(Tier2, name = "n_B") %>%
+    filter(n_B >= min_cells)
+  
+  dA <- dA %>% semi_join(keep_A, by = "Tier2")
+  dB <- dB %>% semi_join(keep_B, by = "Tier2")
+  
+  rows <- sort(unique(dA$Tier2))
+  cols <- sort(unique(dB$Tier2))
+  
+  D <- matrix(
+    NA_real_,
+    nrow = length(rows),
+    ncol = length(cols),
+    dimnames = list(rows, cols)
+  )
+  
+  if (length(rows) == 0 || length(cols) == 0) {
+    message("No valid epithelial Tier2 after min_cells filter in layer: ", layer_name)
+    return(list(
+      D = D,
+      S = D,
+      bw_global = NA_real_,
+      sigma = NA_real_,
+      layer = layer_name
+    ))
+  }
+  
+  rA_list <- split(dA$value, dA$Tier2)
+  rB_list <- split(dB$value, dB$Tier2)
+  
+  bw_global <- bw.nrd0(c(dA$value, dB$value))
+  
+  if (!is.finite(bw_global) || bw_global <= 0) {
+    bw_global <- 0.05
+  }
+  
+  for (i in seq_along(rows)) {
+    for (j in seq_along(cols)) {
+      D[i, j] <- js_dist_kde(
+        rA_list[[rows[i]]],
+        rB_list[[cols[j]]],
+        bw = bw_global
+      )
+    }
+  }
+  
+  sigma <- as.numeric(quantile(D, 0.5, na.rm = TRUE))
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- mean(D[is.finite(D)], na.rm = TRUE)
+  }
+  
+  if (!is.finite(sigma) || sigma <= 0) {
+    sigma <- 1
+  }
+  
+  S <- exp(-D / sigma)
+  
+  if (plot_heatmap) {
+    safe_pheatmap(
+      order_epi_matrix(S),
+      main = paste0("Step 1: epithelial Day0_A vs Day0_B ", layer_name),
+      color = colorRampPalette(c("white", "gold", "red"))(100),
+      show_numbers = TRUE,
+      number_format = "%.2f",
+      fontsize_number = 7,
+      fontsize_row = 9,
+      fontsize_col = 9,
+      angle_col = 45
+    )
+  }
+  
+  list(
+    D = D,
+    S = S,
+    bw_global = bw_global,
+    sigma = sigma,
+    layer = layer_name
+  )
+}
+
+epi_day0_jsd_list <- setNames(
+  lapply(layers_epi, function(ly) {
+    compute_epi_benchmark_layer_jsd(
+      layer_name = ly,
+      coord = "r_for_jsd",
+      min_cells = min_cells_epi,
+      plot_heatmap = TRUE
+    )
+  }),
+  layers_epi
+)
+
+# ============================================================
+# 4. Step 2: Cell-count-weighted summary across layers
+# ============================================================
+
+epi_day0_A_counts <- healthy_epi_benchmark %>%
+  filter(benchmark_group == "Day0_A") %>%
+  count(layer, Tier2, name = "n") %>%
+  mutate(layer = as.character(layer), Tier2 = as.character(Tier2))
+
+epi_day0_B_counts <- healthy_epi_benchmark %>%
+  filter(benchmark_group == "Day0_B") %>%
+  count(layer, Tier2, name = "n") %>%
+  mutate(layer = as.character(layer), Tier2 = as.character(Tier2))
+
+all_rows_epi_day0 <- sort(unique(unlist(lapply(epi_day0_jsd_list, function(x) rownames(x$S)))))
+all_cols_epi_day0 <- sort(unique(unlist(lapply(epi_day0_jsd_list, function(x) colnames(x$S)))))
+
+S_num_epi_day0 <- matrix(0, length(all_rows_epi_day0), length(all_cols_epi_day0),
+                         dimnames = list(all_rows_epi_day0, all_cols_epi_day0))
+S_den_epi_day0 <- matrix(0, length(all_rows_epi_day0), length(all_cols_epi_day0),
+                         dimnames = list(all_rows_epi_day0, all_cols_epi_day0))
+layer_coverage_epi_day0 <- matrix(0, length(all_rows_epi_day0), length(all_cols_epi_day0),
+                                  dimnames = list(all_rows_epi_day0, all_cols_epi_day0))
+cell_weight_sum_epi_day0 <- matrix(0, length(all_rows_epi_day0), length(all_cols_epi_day0),
+                                   dimnames = list(all_rows_epi_day0, all_cols_epi_day0))
+
+for (ly in layers_epi) {
+  
+  S_layer <- epi_day0_jsd_list[[ly]]$S
+  
+  nA_layer <- epi_day0_A_counts %>% filter(layer == ly)
+  nB_layer <- epi_day0_B_counts %>% filter(layer == ly)
+  
+  for (i in rownames(S_layer)) {
+    for (j in colnames(S_layer)) {
+      
+      sij <- S_layer[i, j]
+      if (!is.finite(sij)) next
+      
+      n_i <- nA_layer %>% filter(Tier2 == i) %>% pull(n)
+      n_j <- nB_layer %>% filter(Tier2 == j) %>% pull(n)
+      
+      if (length(n_i) == 0 || length(n_j) == 0) next
+      
+      w <- sqrt(n_i * n_j)
+      if (!is.finite(w) || w <= 0) next
+      
+      S_num_epi_day0[i, j] <- S_num_epi_day0[i, j] + w * sij
+      S_den_epi_day0[i, j] <- S_den_epi_day0[i, j] + w
+      layer_coverage_epi_day0[i, j] <- layer_coverage_epi_day0[i, j] + 1
+      cell_weight_sum_epi_day0[i, j] <- cell_weight_sum_epi_day0[i, j] + w
+    }
+  }
+}
+
+S_epi_day0_summary <- S_num_epi_day0 / S_den_epi_day0
+S_epi_day0_summary[S_den_epi_day0 == 0] <- NA
+
+# ============================================================
+# 5. Step 3: Anatomical layer-distribution overlap
+# ============================================================
+
+epi_day0_A_layer_props <- get_epi_layer_props(epi_day0_A_counts)
+epi_day0_B_layer_props <- get_epi_layer_props(epi_day0_B_counts)
+
+layer_distribution_overlap_epi_day0 <- matrix(
+  NA_real_,
+  nrow = nrow(S_epi_day0_summary),
+  ncol = ncol(S_epi_day0_summary),
+  dimnames = dimnames(S_epi_day0_summary)
+)
+
+for (i in rownames(S_epi_day0_summary)) {
+  for (j in colnames(S_epi_day0_summary)) {
+    
+    pi <- epi_day0_A_layer_props %>%
+      filter(Tier2 == i) %>%
+      select(layer, p_i = p)
+    
+    pj <- epi_day0_B_layer_props %>%
+      filter(Tier2 == j) %>%
+      select(layer, p_j = p)
+    
+    pp <- full_join(pi, pj, by = "layer") %>%
+      mutate(
+        p_i = tidyr::replace_na(p_i, 0),
+        p_j = tidyr::replace_na(p_j, 0)
+      )
+    
+    layer_distribution_overlap_epi_day0[i, j] <- sum(sqrt(pp$p_i * pp$p_j))
+  }
+}
+
+layer_distribution_overlap_epi_day0_gamma <- layer_distribution_overlap_epi_day0 ^ gamma_epi_day0
+S_epi_day0_final_mixture_aware <- S_epi_day0_summary * layer_distribution_overlap_epi_day0_gamma
+
+# ============================================================
+# 6. Reorder epithelial matrices
+# ============================================================
+
+S_epi_day0_summary_ordered <- order_epi_matrix(S_epi_day0_summary)
+layer_distribution_overlap_epi_day0_ordered <- order_epi_matrix(layer_distribution_overlap_epi_day0)
+S_epi_day0_final_mixture_aware_ordered <- order_epi_matrix(S_epi_day0_final_mixture_aware)
+cell_weight_sum_epi_day0_ordered <- order_epi_matrix(cell_weight_sum_epi_day0)
+layer_coverage_epi_day0_ordered <- order_epi_matrix(layer_coverage_epi_day0)
+
+# ============================================================
+# 7. Heatmaps with numbers
+# ============================================================
+
+epi_heat_cols <- colorRampPalette(c("white", "gold", "red"))(100)
+overlap_cols <- colorRampPalette(c("white", "skyblue", "navy"))(100)
+coverage_cols <- colorRampPalette(c("white", "grey80", "black"))(100)
+
+safe_pheatmap(
+  S_epi_day0_summary_ordered,
+  main = "Step 2: epithelial Day0 vs Day0 weighted spatial similarity",
+  color = epi_heat_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  layer_distribution_overlap_epi_day0_ordered,
+  main = "Step 3 only: epithelial layer-distribution overlap",
+  color = overlap_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  S_epi_day0_final_mixture_aware_ordered,
+  main = paste0("Final: epithelial Day0 vs Day0 mixture-aware similarity, gamma = ", gamma_epi_day0),
+  color = epi_heat_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  layer_coverage_epi_day0_ordered,
+  main = "QC: epithelial layer coverage count",
+  color = coverage_cols,
+  show_numbers = TRUE,
+  number_format = "%.0f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+# ============================================================
+# 8. Self-match diagnostics
+# ============================================================
+
+get_self_match_epi <- function(S_mat) {
+  
+  bind_rows(lapply(rownames(S_mat), function(i) {
+    
+    rank_table <- tibble(
+      Day0_B_Tier2 = colnames(S_mat),
+      similarity = as.numeric(S_mat[i, ])
+    ) %>%
+      filter(is.finite(similarity)) %>%
+      arrange(desc(similarity)) %>%
+      mutate(rank = row_number())
+    
+    self_row <- rank_table %>%
+      filter(Day0_B_Tier2 == i)
+    
+    tibble(
+      Day0_A_Tier2 = i,
+      top_Day0_B_Tier2 = if (nrow(rank_table) == 0) NA_character_ else rank_table$Day0_B_Tier2[1],
+      top_similarity = if (nrow(rank_table) == 0) NA_real_ else rank_table$similarity[1],
+      self_similarity = if (nrow(self_row) == 0) NA_real_ else self_row$similarity[1],
+      self_rank = if (nrow(self_row) == 0) NA_real_ else self_row$rank[1],
+      self_is_top1 = if (nrow(self_row) == 0) FALSE else self_row$rank[1] == 1,
+      top5_Day0_B_matches = get_top_matches_epi(i, S_mat, top_n = 5)
+    )
+  }))
+}
+
+epi_day0_self_match <- get_self_match_epi(S_epi_day0_final_mixture_aware_ordered)
+
+epi_day0_self_match %>%
+  arrange(self_rank, desc(self_similarity))
+
+epi_day0_self_match %>%
+  summarise(
+    n_epi_cell_types = n(),
+    n_self_top1 = sum(self_is_top1, na.rm = TRUE),
+    prop_self_top1 = mean(self_is_top1, na.rm = TRUE),
+    median_self_rank = median(self_rank, na.rm = TRUE),
+    mean_self_similarity = mean(self_similarity, na.rm = TRUE)
+  )
+
+# ============================================================
+# 9. Ground-truth epithelial sanity check with rank / total
+# ============================================================
+
+epi_crypt_axis_pairs <- tibble::tribble(
+  ~Day0_A_Tier2, ~Day0_B_Tier2, ~expected_relationship, ~priority,
+  "Stem cells",  "Stem cells",  "self-match; crypt base", "high",
+  "TA",          "TA",          "self-match; transit-amplifying", "high",
+  "Colonocytes", "Colonocytes", "self-match; crypt tip mature epithelial", "high",
+  "Goblet 1",    "Goblet 1",    "self-match; crypt-base goblet", "high",
+  "Goblet 2",    "Goblet 2",    "self-match; crypt-tip goblet", "high",
+  "Stem cells",  "TA",          "adjacent along crypt base-to-tip axis", "medium",
+  "TA",          "Colonocytes", "adjacent along crypt base-to-tip axis", "medium",
+  "Goblet 1",    "Stem cells",  "both crypt-base associated", "medium",
+  "Goblet 2",    "Colonocytes", "both crypt-tip associated", "medium",
+  "Stem cells",  "Colonocytes", "same lineage but farther apart", "low"
+)
+
+epi_crypt_axis_check <- epi_crypt_axis_pairs %>%
+  rowwise() %>%
+  mutate(
+    step2_weighted_summary_similarity = pull_matrix_value_epi(
+      S_epi_day0_summary_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    step3_layer_distribution_overlap = pull_matrix_value_epi(
+      layer_distribution_overlap_epi_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    final_mixture_aware_similarity = pull_matrix_value_epi(
+      S_epi_day0_final_mixture_aware_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    total_cell_weight = pull_matrix_value_epi(
+      cell_weight_sum_epi_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    layer_coverage = pull_matrix_value_epi(
+      layer_coverage_epi_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    rank_among_Day0_B_epi = get_rank_for_pair_epi(
+      Day0_A_Tier2,
+      Day0_B_Tier2,
+      S_epi_day0_final_mixture_aware_ordered
+    ),
+    n_candidate_Day0_B_epi = ifelse(
+      Day0_A_Tier2 %in% rownames(S_epi_day0_final_mixture_aware_ordered),
+      sum(is.finite(S_epi_day0_final_mixture_aware_ordered[Day0_A_Tier2, ])),
+      NA_integer_
+    ),
+    rank_out_of_total = ifelse(
+      is.finite(rank_among_Day0_B_epi),
+      paste0(rank_among_Day0_B_epi, " / ", n_candidate_Day0_B_epi),
+      NA_character_
+    ),
+    percentile_rank = ifelse(
+      is.finite(rank_among_Day0_B_epi) & n_candidate_Day0_B_epi > 1,
+      1 - (rank_among_Day0_B_epi - 1) / (n_candidate_Day0_B_epi - 1),
+      NA_real_
+    ),
+    is_top1 = rank_among_Day0_B_epi == 1,
+    is_top3 = rank_among_Day0_B_epi <= 3,
+    top5_Day0_B_matches_for_Day0_A = get_top_matches_epi(
+      Day0_A_Tier2,
+      S_epi_day0_final_mixture_aware_ordered,
+      top_n = 5
+    )
+  ) %>%
+  ungroup()
+
+epi_crypt_axis_check %>%
+  arrange(priority, rank_among_Day0_B_epi, desc(final_mixture_aware_similarity))
+
+epi_crypt_axis_summary <- epi_crypt_axis_check %>%
+  summarise(
+    n_ground_truth_pairs = n(),
+    n_testable_pairs = sum(is.finite(rank_among_Day0_B_epi)),
+    n_top1 = sum(is_top1, na.rm = TRUE),
+    n_top3 = sum(is_top3, na.rm = TRUE),
+    prop_top1 = mean(is_top1, na.rm = TRUE),
+    prop_top3 = mean(is_top3, na.rm = TRUE),
+    median_rank = median(rank_among_Day0_B_epi, na.rm = TRUE),
+    mean_percentile_rank = mean(percentile_rank, na.rm = TRUE),
+    mean_final_similarity = mean(final_mixture_aware_similarity, na.rm = TRUE)
+  )
+
+epi_crypt_axis_summary
+```
+
+## Fibro
+```{r}
+# ============================================================
+# Fibro: Day0 vs Day0 fibroblast-only benchmark
+# Revised version:
+#   1. Uses fibroblast Tier1 only
+#   2. Uses stratified split within layer × Tier2
+#   3. Uses lower post-split threshold
+#   4. Reorders fibroblasts by MU / SM / ME ground truth
+#   5. Reports ground-truth rank as rank / total candidates
+# ============================================================
+
+# ------------------------------------------------------------
+# Fine-tuning parameters for fibroblast benchmark
+# ------------------------------------------------------------
+
+min_cells_fibro <- 15
+gamma_fibro_day0 <- 1
+
+use_only_MU_for_fibro <- FALSE
+
+if (use_only_MU_for_fibro) {
+  layers_fibro <- "MU"
+} else {
+  layers_fibro <- c("MU", "SM", "ME")
+}
+
+# ------------------------------------------------------------
+# Fibroblast Tier1 filter
+# ------------------------------------------------------------
+
+is_fibro_tier1 <- function(x) {
+  grepl("fibro", x, ignore.case = TRUE)
+}
+
+# ------------------------------------------------------------
+# Fibroblast biological order based on MU / SM / ME ground truth
+# ------------------------------------------------------------
+# MU: Fibro 6 -> Fibro 13 -> Fibro 2
+# SM/ME enriched: Fibro 7
+# ME: Fibro 15
+# ------------------------------------------------------------
+
+expected_fibro_order <- c(
+  "Fibro 6",
+  "Fibro 13",
+  "Fibro 2",
+  "Fibro 7",
+  "Fibro 15",
+  "Fibro 1",
+  "Fibro 4",
+  "FRC",
+  "Fibro 5",
+  "Fibro 12",
+  "Pericyte 1",
+  "Pericyte 2",
+  "IAF 2"
+)
+
+order_fibro_matrix <- function(mat) {
+  
+  row_order <- c(
+    intersect(expected_fibro_order, rownames(mat)),
+    setdiff(rownames(mat), expected_fibro_order)
+  )
+  
+  col_order <- c(
+    intersect(expected_fibro_order, colnames(mat)),
+    setdiff(colnames(mat), expected_fibro_order)
+  )
+  
+  mat[row_order, col_order, drop = FALSE]
+}
+
+# ------------------------------------------------------------
+# 1. Read Healthy xyt_mapped files and keep fibroblast Tier1 only
+# ------------------------------------------------------------
+
+healthy_fibro_benchmark <- bind_rows(lapply(layers_fibro, function(ly) {
+  read_csv(
+    file.path(outdir, paste0("Healthy_xyt_mapped_", ly, ".csv")),
+    show_col_types = FALSE
+  )
+})) %>%
+  mutate(
+    layer = as.character(layer),
+    Tier1 = as.character(Tier1),
+    Tier2 = as.character(Tier2),
+    r_for_jsd = as.numeric(r_for_jsd)
+  ) %>%
+  filter(
+    layer %in% layers_fibro,
+    !is.na(Tier1),
+    !is.na(Tier2),
+    is_fibro_tier1(Tier1),
+    is.finite(r_for_jsd),
+    r_for_jsd >= 0,
+    r_for_jsd <= 1
+  )
+
+healthy_fibro_benchmark %>%
+  count(layer, Tier2, name = "n_cells") %>%
+  arrange(layer, desc(n_cells))
+
+healthy_fibro_benchmark %>%
+  count(Tier2, name = "total_cells") %>%
+  arrange(desc(total_cells))
+
+# ------------------------------------------------------------
+# 2. Stratified split within layer × Tier2
+# ------------------------------------------------------------
+
+healthy_fibro_benchmark <- healthy_fibro_benchmark %>%
+  group_by(layer, Tier2) %>%
+  mutate(
+    benchmark_group = sample(
+      rep(c("Day0_A", "Day0_B"), length.out = n())
+    )
+  ) %>%
+  ungroup()
+
+table(healthy_fibro_benchmark$benchmark_group)
+
+healthy_fibro_benchmark %>%
+  count(layer, Tier2, benchmark_group, name = "n_cells") %>%
+  arrange(layer, Tier2, benchmark_group)
+
+# ------------------------------------------------------------
+# 3. Step 1: layer-specific fibroblast JSD similarity
+# ------------------------------------------------------------
+# Reuse compute_epi_benchmark_layer_jsd() by temporarily assigning
+# fibroblast benchmark data to healthy_epi_benchmark.
+# ------------------------------------------------------------
+
+healthy_epi_benchmark_backup <- healthy_epi_benchmark
+healthy_epi_benchmark <- healthy_fibro_benchmark
+
+fibro_day0_jsd_list <- setNames(
+  lapply(layers_fibro, function(ly) {
+    compute_epi_benchmark_layer_jsd(
+      layer_name = ly,
+      coord = "r_for_jsd",
+      min_cells = min_cells_fibro,
+      plot_heatmap = FALSE
+    )
+  }),
+  layers_fibro
+)
+
+healthy_epi_benchmark <- healthy_epi_benchmark_backup
+
+# Step 1 heatmaps with fibroblast ordering
+for (ly in names(fibro_day0_jsd_list)) {
+  
+  S_layer <- fibro_day0_jsd_list[[ly]]$S
+  
+  safe_pheatmap(
+    order_fibro_matrix(S_layer),
+    main = paste0("Step 1: fibroblast Day0_A vs Day0_B ", ly),
+    color = colorRampPalette(c("white", "gold", "red"))(100),
+    show_numbers = TRUE,
+    number_format = "%.2f",
+    fontsize_number = 7,
+    fontsize_row = 9,
+    fontsize_col = 9,
+    angle_col = 45
+  )
+}
+
+# ------------------------------------------------------------
+# 4. Step 2: cell-count-weighted summary across layers
+# ------------------------------------------------------------
+
+fibro_day0_A_counts <- healthy_fibro_benchmark %>%
+  filter(benchmark_group == "Day0_A") %>%
+  count(layer, Tier2, name = "n") %>%
+  mutate(layer = as.character(layer), Tier2 = as.character(Tier2))
+
+fibro_day0_B_counts <- healthy_fibro_benchmark %>%
+  filter(benchmark_group == "Day0_B") %>%
+  count(layer, Tier2, name = "n") %>%
+  mutate(layer = as.character(layer), Tier2 = as.character(Tier2))
+
+all_rows_fibro_day0 <- sort(unique(unlist(lapply(fibro_day0_jsd_list, function(x) rownames(x$S)))))
+all_cols_fibro_day0 <- sort(unique(unlist(lapply(fibro_day0_jsd_list, function(x) colnames(x$S)))))
+
+S_num_fibro_day0 <- matrix(0, length(all_rows_fibro_day0), length(all_cols_fibro_day0),
+                           dimnames = list(all_rows_fibro_day0, all_cols_fibro_day0))
+S_den_fibro_day0 <- matrix(0, length(all_rows_fibro_day0), length(all_cols_fibro_day0),
+                           dimnames = list(all_rows_fibro_day0, all_cols_fibro_day0))
+layer_coverage_fibro_day0 <- matrix(0, length(all_rows_fibro_day0), length(all_cols_fibro_day0),
+                                    dimnames = list(all_rows_fibro_day0, all_cols_fibro_day0))
+cell_weight_sum_fibro_day0 <- matrix(0, length(all_rows_fibro_day0), length(all_cols_fibro_day0),
+                                     dimnames = list(all_rows_fibro_day0, all_cols_fibro_day0))
+
+for (ly in layers_fibro) {
+  
+  S_layer <- fibro_day0_jsd_list[[ly]]$S
+  
+  nA_layer <- fibro_day0_A_counts %>% filter(layer == ly)
+  nB_layer <- fibro_day0_B_counts %>% filter(layer == ly)
+  
+  for (i in rownames(S_layer)) {
+    for (j in colnames(S_layer)) {
+      
+      sij <- S_layer[i, j]
+      if (!is.finite(sij)) next
+      
+      n_i <- nA_layer %>% filter(Tier2 == i) %>% pull(n)
+      n_j <- nB_layer %>% filter(Tier2 == j) %>% pull(n)
+      
+      if (length(n_i) == 0 || length(n_j) == 0) next
+      
+      w <- sqrt(n_i * n_j)
+      if (!is.finite(w) || w <= 0) next
+      
+      S_num_fibro_day0[i, j] <- S_num_fibro_day0[i, j] + w * sij
+      S_den_fibro_day0[i, j] <- S_den_fibro_day0[i, j] + w
+      layer_coverage_fibro_day0[i, j] <- layer_coverage_fibro_day0[i, j] + 1
+      cell_weight_sum_fibro_day0[i, j] <- cell_weight_sum_fibro_day0[i, j] + w
+    }
+  }
+}
+
+S_fibro_day0_summary <- S_num_fibro_day0 / S_den_fibro_day0
+S_fibro_day0_summary[S_den_fibro_day0 == 0] <- NA
+
+# ------------------------------------------------------------
+# 5. Step 3: anatomical layer-distribution overlap
+# ------------------------------------------------------------
+
+fibro_day0_A_layer_props <- get_epi_layer_props(fibro_day0_A_counts)
+fibro_day0_B_layer_props <- get_epi_layer_props(fibro_day0_B_counts)
+
+layer_distribution_overlap_fibro_day0 <- matrix(
+  NA_real_,
+  nrow = nrow(S_fibro_day0_summary),
+  ncol = ncol(S_fibro_day0_summary),
+  dimnames = dimnames(S_fibro_day0_summary)
+)
+
+for (i in rownames(S_fibro_day0_summary)) {
+  for (j in colnames(S_fibro_day0_summary)) {
+    
+    pi <- fibro_day0_A_layer_props %>%
+      filter(Tier2 == i) %>%
+      select(layer, p_i = p)
+    
+    pj <- fibro_day0_B_layer_props %>%
+      filter(Tier2 == j) %>%
+      select(layer, p_j = p)
+    
+    pp <- full_join(pi, pj, by = "layer") %>%
+      mutate(
+        p_i = tidyr::replace_na(p_i, 0),
+        p_j = tidyr::replace_na(p_j, 0)
+      )
+    
+    layer_distribution_overlap_fibro_day0[i, j] <- sum(sqrt(pp$p_i * pp$p_j))
+  }
+}
+
+layer_distribution_overlap_fibro_day0_gamma <- layer_distribution_overlap_fibro_day0 ^ gamma_fibro_day0
+S_fibro_day0_final_mixture_aware <- S_fibro_day0_summary * layer_distribution_overlap_fibro_day0_gamma
+
+# ------------------------------------------------------------
+# 6. Reorder fibroblast matrices
+# ------------------------------------------------------------
+
+S_fibro_day0_summary_ordered <- order_fibro_matrix(S_fibro_day0_summary)
+layer_distribution_overlap_fibro_day0_ordered <- order_fibro_matrix(layer_distribution_overlap_fibro_day0)
+S_fibro_day0_final_mixture_aware_ordered <- order_fibro_matrix(S_fibro_day0_final_mixture_aware)
+cell_weight_sum_fibro_day0_ordered <- order_fibro_matrix(cell_weight_sum_fibro_day0)
+layer_coverage_fibro_day0_ordered <- order_fibro_matrix(layer_coverage_fibro_day0)
+
+# ------------------------------------------------------------
+# 7. Fibroblast heatmaps
+# ------------------------------------------------------------
+
+fibro_heat_cols <- colorRampPalette(c("white", "gold", "red"))(100)
+fibro_overlap_cols <- colorRampPalette(c("white", "skyblue", "navy"))(100)
+fibro_coverage_cols <- colorRampPalette(c("white", "grey80", "black"))(100)
+
+safe_pheatmap(
+  S_fibro_day0_summary_ordered,
+  main = "Step 2: fibroblast Day0 vs Day0 weighted spatial similarity",
+  color = fibro_heat_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  layer_distribution_overlap_fibro_day0_ordered,
+  main = "Step 3 only: fibroblast layer-distribution overlap",
+  color = fibro_overlap_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  S_fibro_day0_final_mixture_aware_ordered,
+  main = paste0("Final: fibroblast Day0 vs Day0 mixture-aware similarity, gamma = ", gamma_fibro_day0),
+  color = fibro_heat_cols,
+  show_numbers = TRUE,
+  number_format = "%.2f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+safe_pheatmap(
+  layer_coverage_fibro_day0_ordered,
+  main = "QC: fibroblast layer coverage count",
+  color = fibro_coverage_cols,
+  show_numbers = TRUE,
+  number_format = "%.0f",
+  fontsize_number = 7,
+  fontsize_row = 9,
+  fontsize_col = 9,
+  angle_col = 45
+)
+
+# ------------------------------------------------------------
+# 8. Self-match diagnostics
+# ------------------------------------------------------------
+
+fibro_day0_self_match <- get_self_match_epi(
+  S_fibro_day0_final_mixture_aware_ordered
+)
+
+fibro_day0_self_match %>%
+  arrange(self_rank, desc(self_similarity))
+
+fibro_day0_self_match %>%
+  summarise(
+    n_fibro_cell_types = n(),
+    n_self_top1 = sum(self_is_top1, na.rm = TRUE),
+    prop_self_top1 = mean(self_is_top1, na.rm = TRUE),
+    median_self_rank = median(self_rank, na.rm = TRUE),
+    mean_self_similarity = mean(self_similarity, na.rm = TRUE)
+  )
+
+# ------------------------------------------------------------
+# 9. Fibroblast spatial sanity check with rank / total
+# ------------------------------------------------------------
+
+fibro_ground_truth_pairs <- tibble::tribble(
+  ~Day0_A_Tier2, ~Day0_B_Tier2, ~expected_relationship, ~expected_layer, ~priority,
+  
+  "Fibro 6",  "Fibro 6",  "self-match; MU crypt-base fibroblast", "MU", "high",
+  "Fibro 13", "Fibro 13", "self-match; MU lamina propria / broad mucosal fibroblast", "MU", "high",
+  "Fibro 2",  "Fibro 2",  "self-match; MU crypt-tip / telocyte-like fibroblast", "MU", "high",
+  "Fibro 7",  "Fibro 7",  "self-match; SM-enriched fibroblast with SM/ME distribution", "SM/ME", "high",
+  "Fibro 15", "Fibro 15", "self-match; ME muscle-layer / myenteric-plexus-associated", "ME", "high",
+  
+  "Fibro 6",  "Fibro 13", "MU local relationship: crypt base -> lamina propria", "MU", "medium",
+  "Fibro 13", "Fibro 2",  "MU local relationship: lamina propria -> crypt tip", "MU", "medium",
+  "Fibro 6",  "Fibro 2",  "MU crypt-axis relationship: base -> tip", "MU", "medium",
+  
+  "Fibro 7",  "Fibro 15", "SM/ME neighboring stromal relationship", "SM/ME", "medium"
+)
+
+fibro_ground_truth_check <- fibro_ground_truth_pairs %>%
+  rowwise() %>%
+  mutate(
+    step2_weighted_summary_similarity = pull_matrix_value_epi(
+      S_fibro_day0_summary_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    step3_layer_distribution_overlap = pull_matrix_value_epi(
+      layer_distribution_overlap_fibro_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    final_mixture_aware_similarity = pull_matrix_value_epi(
+      S_fibro_day0_final_mixture_aware_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    total_cell_weight = pull_matrix_value_epi(
+      cell_weight_sum_fibro_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    layer_coverage = pull_matrix_value_epi(
+      layer_coverage_fibro_day0_ordered,
+      Day0_A_Tier2,
+      Day0_B_Tier2
+    ),
+    rank_among_Day0_B_fibro = get_rank_for_pair_epi(
+      Day0_A_Tier2,
+      Day0_B_Tier2,
+      S_fibro_day0_final_mixture_aware_ordered
+    ),
+    n_candidate_Day0_B_fibro = ifelse(
+      Day0_A_Tier2 %in% rownames(S_fibro_day0_final_mixture_aware_ordered),
+      sum(is.finite(S_fibro_day0_final_mixture_aware_ordered[Day0_A_Tier2, ])),
+      NA_integer_
+    ),
+    rank_out_of_total = ifelse(
+      is.finite(rank_among_Day0_B_fibro),
+      paste0(rank_among_Day0_B_fibro, " / ", n_candidate_Day0_B_fibro),
+      NA_character_
+    ),
+    percentile_rank = ifelse(
+      is.finite(rank_among_Day0_B_fibro) & n_candidate_Day0_B_fibro > 1,
+      1 - (rank_among_Day0_B_fibro - 1) / (n_candidate_Day0_B_fibro - 1),
+      NA_real_
+    ),
+    is_top1 = rank_among_Day0_B_fibro == 1,
+    is_top3 = rank_among_Day0_B_fibro <= 3,
+    top5_Day0_B_matches_for_Day0_A = get_top_matches_epi(
+      Day0_A_Tier2,
+      S_fibro_day0_final_mixture_aware_ordered,
+      top_n = 5
+    )
+  ) %>%
+  ungroup()
+
+fibro_ground_truth_check %>%
+  arrange(priority, rank_among_Day0_B_fibro, desc(final_mixture_aware_similarity))
+
+fibro_ground_truth_summary <- fibro_ground_truth_check %>%
+  summarise(
+    n_ground_truth_pairs = n(),
+    n_testable_pairs = sum(is.finite(rank_among_Day0_B_fibro)),
+    n_top1 = sum(is_top1, na.rm = TRUE),
+    n_top3 = sum(is_top3, na.rm = TRUE),
+    prop_top1 = mean(is_top1, na.rm = TRUE),
+    prop_top3 = mean(is_top3, na.rm = TRUE),
+    median_rank = median(rank_among_Day0_B_fibro, na.rm = TRUE),
+    mean_percentile_rank = mean(percentile_rank, na.rm = TRUE),
+    mean_final_similarity = mean(final_mixture_aware_similarity, na.rm = TRUE)
+  )
+
+fibro_ground_truth_summary
+```
+
+## specific check
+```{r}
+# ============================================================
+# Specific spatial check for unexpected Day0_A vs Day0_B pairs
+# ============================================================
+# Works for either:
+#   check_dataset = "epi"   -> uses healthy_epi_benchmark
+#   check_dataset = "fibro" -> uses healthy_fibro_benchmark
+#
+# It generates:
+#   1. Whole Healthy Day0 plot
+#   2. Day0_A-only plot
+#   3. Day0_B-only plot
+#   4. Actual benchmark-role plot:
+#        Day0_A selected Tier2 vs Day0_B selected Tier2
+#   5. Count table by layer and split
+#   6. Similarity/rank table for the selected pair
+# ============================================================
+
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+# ------------------------------------------------------------
+# 0. Choose dataset and pair to inspect
+# ------------------------------------------------------------
+
+check_dataset <- "epi"
+# options:
+#   "epi"
+#   "fibro"
+
+check_A_tier2 <- "TA"
+check_B_tier2 <- "IAE 2"
+
+# Examples:
+# check_dataset <- "epi"
+# check_A_tier2 <- "TA"
+# check_B_tier2 <- "Colonocytes"
+#
+# check_dataset <- "fibro"
+# check_A_tier2 <- "Pericyte 2"
+# check_B_tier2 <- "Fibro 7"
+
+# ------------------------------------------------------------
+# 1. Select correct benchmark object and matrices
+# ------------------------------------------------------------
+
+if (check_dataset == "epi") {
+  
+  check_df <- healthy_epi_benchmark
+  
+  check_S_step2 <- S_epi_day0_summary_ordered
+  check_S_final <- S_epi_day0_final_mixture_aware_ordered
+  check_O_step3 <- layer_distribution_overlap_epi_day0_ordered
+  check_layer_coverage <- layer_coverage_epi_day0_ordered
+  check_cell_weight <- cell_weight_sum_epi_day0_ordered
+  
+} else if (check_dataset == "fibro") {
+  
+  check_df <- healthy_fibro_benchmark
+  
+  check_S_step2 <- S_fibro_day0_summary_ordered
+  check_S_final <- S_fibro_day0_final_mixture_aware_ordered
+  check_O_step3 <- layer_distribution_overlap_fibro_day0_ordered
+  check_layer_coverage <- layer_coverage_fibro_day0_ordered
+  check_cell_weight <- cell_weight_sum_fibro_day0_ordered
+  
+} else {
+  
+  stop("check_dataset must be either 'epi' or 'fibro'")
+}
+
+# ------------------------------------------------------------
+# 2. Check whether selected Tier2 labels exist
+# ------------------------------------------------------------
+
+selected_label_check <- check_df %>%
+  filter(Tier2 %in% c(check_A_tier2, check_B_tier2)) %>%
+  count(Tier2, name = "n_cells") %>%
+  arrange(desc(n_cells))
+
+selected_label_check
+
+if (nrow(selected_label_check) == 0) {
+  message("Selected Tier2 labels were not found. Available Tier2 labels are:")
+  print(
+    check_df %>%
+      count(Tier2, name = "n_cells") %>%
+      arrange(desc(n_cells))
+  )
+}
+
+# ------------------------------------------------------------
+# 3. Count selected pair by layer and split
+# ------------------------------------------------------------
+
+specific_pair_counts <- check_df %>%
+  filter(Tier2 %in% c(check_A_tier2, check_B_tier2)) %>%
+  count(benchmark_group, layer, Tier2, name = "n_cells") %>%
+  arrange(Tier2, benchmark_group, layer)
+
+specific_pair_counts
+
+# ------------------------------------------------------------
+# 4. Plot whole Day0 / Day0_A / Day0_B
+# ------------------------------------------------------------
+
+plot_specific_pair_layer <- function(df,
+                                     tier2_A,
+                                     tier2_B,
+                                     title_prefix = "Specific pair check") {
+  
+  df_plot <- df %>%
+    mutate(
+      layer = as.character(layer),
+      Tier2 = as.character(Tier2),
+      pair_status = case_when(
+        Tier2 == tier2_A ~ tier2_A,
+        Tier2 == tier2_B ~ tier2_B,
+        TRUE ~ "Background"
+      ),
+      pair_status = factor(
+        pair_status,
+        levels = c("Background", tier2_A, tier2_B)
+      )
+    )
+  
+  ggplot() +
+    geom_point(
+      data = df_plot,
+      aes(x = x, y = y),
+      color = "grey88",
+      size = 0.18,
+      alpha = 0.35
+    ) +
+    geom_point(
+      data = df_plot %>% filter(pair_status != "Background"),
+      aes(x = x, y = y, color = pair_status),
+      size = 0.75,
+      alpha = 0.95
+    ) +
+    coord_equal() +
+    facet_wrap(~ layer) +
+    theme_void() +
+    labs(
+      title = paste0(title_prefix, ": ", tier2_A, " vs ", tier2_B),
+      color = "Tier2"
+    ) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      strip.text = element_text(size = 13),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 11)
+    )
+}
+
+# Whole Healthy Day0
+p_whole_day0 <- plot_specific_pair_layer(
+  df = check_df,
+  tier2_A = check_A_tier2,
+  tier2_B = check_B_tier2,
+  title_prefix = "Whole Healthy Day0"
+)
+
+p_whole_day0
+
+# Day0_A only
+p_day0_A <- plot_specific_pair_layer(
+  df = check_df %>% filter(benchmark_group == "Day0_A"),
+  tier2_A = check_A_tier2,
+  tier2_B = check_B_tier2,
+  title_prefix = "Day0_A only"
+)
+
+p_day0_A
+
+# Day0_B only
+p_day0_B <- plot_specific_pair_layer(
+  df = check_df %>% filter(benchmark_group == "Day0_B"),
+  tier2_A = check_A_tier2,
+  tier2_B = check_B_tier2,
+  title_prefix = "Day0_B only"
+)
+
+p_day0_B
+
+# ------------------------------------------------------------
+# 5. Plot actual benchmark role:
+#    Day0_A selected Tier2 -> Day0_B selected Tier2
+# ------------------------------------------------------------
+
+plot_actual_benchmark_pair <- function(df,
+                                       tier2_A,
+                                       tier2_B,
+                                       title_prefix = "Actual benchmark comparison") {
+  
+  df_pair <- df %>%
+    filter(
+      (benchmark_group == "Day0_A" & Tier2 == tier2_A) |
+        (benchmark_group == "Day0_B" & Tier2 == tier2_B)
+    ) %>%
+    mutate(
+      pair_status = case_when(
+        benchmark_group == "Day0_A" & Tier2 == tier2_A ~ paste0("Day0_A: ", tier2_A),
+        benchmark_group == "Day0_B" & Tier2 == tier2_B ~ paste0("Day0_B: ", tier2_B),
+        TRUE ~ "Other"
+      ),
+      pair_status = factor(
+        pair_status,
+        levels = c(
+          paste0("Day0_A: ", tier2_A),
+          paste0("Day0_B: ", tier2_B)
+        )
+      )
+    )
+  
+  ggplot() +
+    geom_point(
+      data = df,
+      aes(x = x, y = y),
+      color = "grey88",
+      size = 0.18,
+      alpha = 0.35
+    ) +
+    geom_point(
+      data = df_pair,
+      aes(x = x, y = y, color = pair_status),
+      size = 0.8,
+      alpha = 0.95
+    ) +
+    coord_equal() +
+    facet_wrap(~ layer) +
+    theme_void() +
+    labs(
+      title = paste0(
+        title_prefix,
+        ": Day0_A ",
+        tier2_A,
+        " -> Day0_B ",
+        tier2_B
+      ),
+      color = "Benchmark role"
+    ) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      strip.text = element_text(size = 13),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 11)
+    )
+}
+
+p_actual_pair <- plot_actual_benchmark_pair(
+  df = check_df,
+  tier2_A = check_A_tier2,
+  tier2_B = check_B_tier2
+)
+
+p_actual_pair
+
+# ------------------------------------------------------------
+# 6. Pull similarity and rank for selected pair
+# ------------------------------------------------------------
+
+specific_pair_similarity <- tibble(
+  dataset = check_dataset,
+  Day0_A_Tier2 = check_A_tier2,
+  Day0_B_Tier2 = check_B_tier2,
+  
+  step2_similarity = pull_matrix_value_epi(
+    check_S_step2,
+    check_A_tier2,
+    check_B_tier2
+  ),
+  
+  step3_layer_overlap = pull_matrix_value_epi(
+    check_O_step3,
+    check_A_tier2,
+    check_B_tier2
+  ),
+  
+  final_similarity = pull_matrix_value_epi(
+    check_S_final,
+    check_A_tier2,
+    check_B_tier2
+  ),
+  
+  layer_coverage = pull_matrix_value_epi(
+    check_layer_coverage,
+    check_A_tier2,
+    check_B_tier2
+  ),
+  
+  total_cell_weight = pull_matrix_value_epi(
+    check_cell_weight,
+    check_A_tier2,
+    check_B_tier2
+  ),
+  
+  rank_among_Day0_B = get_rank_for_pair_epi(
+    check_A_tier2,
+    check_B_tier2,
+    check_S_final
+  ),
+  
+  n_candidate_Day0_B = ifelse(
+    check_A_tier2 %in% rownames(check_S_final),
+    sum(is.finite(check_S_final[check_A_tier2, ])),
+    NA_integer_
+  ),
+  
+  top5_Day0_B_matches = get_top_matches_epi(
+    check_A_tier2,
+    check_S_final,
+    top_n = 5
+  )
+) %>%
+  mutate(
+    rank_out_of_total = ifelse(
+      is.finite(rank_among_Day0_B),
+      paste0(rank_among_Day0_B, " / ", n_candidate_Day0_B),
+      NA_character_
+    )
+  ) %>%
+  select(
+    dataset,
+    Day0_A_Tier2,
+    Day0_B_Tier2,
+    step2_similarity,
+    step3_layer_overlap,
+    final_similarity,
+    layer_coverage,
+    total_cell_weight,
+    rank_among_Day0_B,
+    n_candidate_Day0_B,
+    rank_out_of_total,
+    top5_Day0_B_matches
+  )
+
+specific_pair_similarity
+
+# ------------------------------------------------------------
+# 7. Optional: show layer proportions for the selected pair
+# ------------------------------------------------------------
+
+specific_pair_layer_props <- check_df %>%
+  filter(Tier2 %in% c(check_A_tier2, check_B_tier2)) %>%
+  count(benchmark_group, Tier2, layer, name = "n") %>%
+  group_by(benchmark_group, Tier2) %>%
+  mutate(
+    total_n = sum(n),
+    prop = n / total_n
+  ) %>%
+  ungroup() %>%
+  arrange(Tier2, benchmark_group, layer)
+
+specific_pair_layer_props
+```

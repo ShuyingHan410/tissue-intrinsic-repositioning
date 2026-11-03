@@ -1,0 +1,351 @@
+---
+title: "Day0 → Day9 fibroblast linkage — full paired-slice rank recovery"
+output: html_document
+date: "2026-06-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Goal
+
+Test whether the tuned three-step spatial-similarity method recovers the
+paper-supported Day0 → Day9 fibroblast polarization linkages (Cadinu et al. 2024,
+Cell), using a **full paired-slice** design:
+
+* Each of the **10 Healthy Day0 slices** is paired with each of the **21
+  DSS9/Day9 slices** → up to **10 × 21 = 210 slice-pair comparisons**.
+* For every slice pair we build a directional similarity matrix with
+  **rows = Day0 fibroblast types** and **columns = Day9 fibroblast/IAF types**.
+* The readout is the **row-wise rank (and normalized rank) of each cognate Day9
+  target among ALL Day9 candidate cell types** — i.e. for the Day0 origin, where
+  does its paper-predicted Day9 partner land in the ranked candidate list.
+
+Ground-truth linkages (all PDF-affirmed, location-preserving polarizations):
+
+| Day0 origin (row) | Day9 target (column) | Compartment |
+|---|---|---|
+| **Fibro 6** | **IAF 2** | crypt base (MU) |
+| **Fibro 2** | **IAF 4** | crypt top (MU) |
+| **Fibro 7** | **Fibro 4** | submucosa (SM/ME) |
+
+```{r libs}
+library(dplyr); library(readr); library(stringr); library(tibble)
+library(tidyr); library(purrr); library(ggplot2); library(knitr)
+```
+
+# Configuration and engine (tuned method)
+
+```{r config-engine}
+per_slice_xyt_dir <- c(
+  Sys.getenv("COORD_DIR", ""),               # explicit override
+  "output_threelayer/per_slice_morphogam",
+  "../output_threelayer/per_slice_morphogam"
+) %>% { .[which(nzchar(.) & dir.exists(.))[1]] }
+stopifnot(!is.na(per_slice_xyt_dir))
+
+layers <- c("MU", "SM", "ME")
+CFG <- list(min_cells = 30, bw_mult = 2, bw_floor = 0.05, grid_n = 512,
+            sigma_quantile = 0.5, gamma = 1)
+
+# read fibroblast-lineage cells (Tier1 == Fibroblast covers Fibro* AND IAF*)
+read_fibro <- function(slice_id, prefix) {
+  bind_rows(lapply(layers, function(ly) {
+    f <- file.path(per_slice_xyt_dir,
+                   paste0(prefix, "_per_slice_", slice_id, "_", ly, "_xyt_mapped.csv"))
+    if (!file.exists(f)) return(tibble())
+    read_csv(f, show_col_types = FALSE)
+  })) %>%
+    mutate(Slice_ID = as.character(Slice_ID), layer = as.character(layer),
+           Tier1 = as.character(Tier1), Tier2 = as.character(Tier2),
+           r_for_jsd = as.numeric(r_for_jsd)) %>%
+    filter(Slice_ID == slice_id, layer %in% layers,
+           grepl("fibro", Tier1, ignore.case = TRUE),
+           is.finite(r_for_jsd), r_for_jsd >= 0, r_for_jsd <= 1) %>%
+    transmute(layer, Tier2, value = r_for_jsd)
+}
+
+js_dist_kde <- function(x, y, bw, grid_n = 512) {
+  x <- x[is.finite(x)]; y <- y[is.finite(y)]
+  if (length(x) < 2 || length(y) < 2) return(NA_real_)
+  dx <- density(x, bw = bw, from = 0, to = 1, n = grid_n)$y
+  dy <- density(y, bw = bw, from = 0, to = 1, n = grid_n)$y
+  px <- dx / sum(dx); py <- dy / sum(dy); m <- 0.5 * (px + py)
+  kl <- function(p, q) { i <- p > 0 & q > 0; sum(p[i] * log(p[i] / q[i])) }
+  sqrt(0.5 * kl(px, m) + 0.5 * kl(py, m))
+}
+
+# THREE-STEP ENGINE (optimised; named-vector lookups so 210 calls are fast).
+# dat: layer, Tier2, value, grp ("A"=Day0 rows, "B"=Day9 cols).
+# query_rows: restrict Day0 rows to these types (we only need the 3 origins).
+three_step <- function(dat, cfg, query_rows = NULL, col_order = NULL) {
+  A <- dat %>% filter(grp == "A"); B <- dat %>% filter(grp == "B")
+
+  # ---- Step 1: per-layer KDE/JSD similarity ----
+  per_layer <- function(ln) {
+    dA <- A %>% filter(layer == ln); dB <- B %>% filter(layer == ln)
+    rs <- dA %>% count(Tier2, name = "n") %>% filter(n >= cfg$min_cells) %>% pull(Tier2)
+    cs <- dB %>% count(Tier2, name = "n") %>% filter(n >= cfg$min_cells) %>% pull(Tier2)
+    if (!is.null(query_rows)) rs <- intersect(rs, query_rows)
+    rs <- sort(rs); cs <- sort(cs)
+    D <- matrix(NA_real_, length(rs), length(cs), dimnames = list(rs, cs))
+    if (!length(rs) || !length(cs)) return(list(S = D))
+    rA <- split(dA$value, dA$Tier2); rB <- split(dB$value, dB$Tier2)
+    bw <- bw.nrd0(c(dA$value, dB$value)) * cfg$bw_mult
+    if (!is.finite(bw) || bw <= 0) bw <- cfg$bw_floor
+    for (i in rs) for (j in cs) D[i, j] <- js_dist_kde(rA[[i]], rB[[j]], bw, cfg$grid_n)
+    sig <- as.numeric(quantile(D, cfg$sigma_quantile, na.rm = TRUE))
+    if (!is.finite(sig) || sig <= 0) sig <- 1
+    list(S = exp(-D / sig))
+  }
+  J <- setNames(lapply(layers, per_layer), layers)
+  ar <- sort(unique(unlist(lapply(J, function(x) rownames(x$S)))))
+  ac <- sort(unique(unlist(lapply(J, function(x) colnames(x$S)))))
+  if (!length(ar) || !length(ac)) return(NULL)
+
+  # ---- Step 2: cell-count-weighted layer integration ----
+  Acnt <- A %>% count(layer, Tier2, name = "n"); Bcnt <- B %>% count(layer, Tier2, name = "n")
+  AcL <- lapply(split(Acnt, Acnt$layer), function(d) setNames(d$n, d$Tier2))
+  BcL <- lapply(split(Bcnt, Bcnt$layer), function(d) setNames(d$n, d$Tier2))
+  Sn <- matrix(0, length(ar), length(ac), dimnames = list(ar, ac)); Sd <- Sn
+  for (ly in layers) {
+    S <- J[[ly]]$S; if (!length(rownames(S)) || !length(colnames(S))) next
+    av <- AcL[[ly]]; bv <- BcL[[ly]]
+    for (i in rownames(S)) for (j in colnames(S)) {
+      s <- S[i, j]; if (!is.finite(s)) next
+      ni <- av[i]; nj <- bv[j]; if (is.na(ni) || is.na(nj)) next
+      w <- sqrt(ni * nj); if (!is.finite(w) || w <= 0) next
+      Sn[i, j] <- Sn[i, j] + w * s; Sd[i, j] <- Sd[i, j] + w
+    }
+  }
+  Ss <- Sn / Sd; Ss[Sd == 0] <- NA
+
+  # ---- Step 3: layer-distribution overlap correction ----
+  Ap <- Acnt %>% group_by(Tier2) %>% mutate(p = n / sum(n)) %>% ungroup()
+  Bp <- Bcnt %>% group_by(Tier2) %>% mutate(p = n / sum(n)) %>% ungroup()
+  ApT <- lapply(split(Ap, Ap$Tier2), function(d) setNames(d$p, d$layer))
+  BpT <- lapply(split(Bp, Bp$Tier2), function(d) setNames(d$p, d$layer))
+  LO <- matrix(NA_real_, nrow(Ss), ncol(Ss), dimnames = dimnames(Ss))
+  for (i in rownames(Ss)) for (j in colnames(Ss)) {
+    pa <- ApT[[i]]; pb <- BpT[[j]]; tot <- 0
+    for (ly in layers) {
+      va <- pa[ly]; vb <- pb[ly]
+      va <- ifelse(is.na(va), 0, va); vb <- ifelse(is.na(vb), 0, vb)
+      tot <- tot + sqrt(va * vb)
+    }
+    LO[i, j] <- tot
+  }
+  M <- Ss * (LO ^ cfg$gamma)
+  ro <- if (is.null(query_rows)) rownames(M) else
+    c(intersect(query_rows, rownames(M)), setdiff(rownames(M), query_rows))
+  co <- if (is.null(col_order)) colnames(M) else
+    c(intersect(col_order, colnames(M)), setdiff(colnames(M), col_order))
+  M[ro, co, drop = FALSE]
+}
+
+# row-wise rank of `cand` among ALL finite candidates in row `q` (1 = best)
+row_rank <- function(S, q, cand) {
+  if (is.null(S) || !(q %in% rownames(S))) return(c(rank = NA, sim = NA, n = NA))
+  v <- S[q, ]; v <- v[is.finite(v)]
+  if (!(cand %in% names(v))) return(c(rank = NA, sim = NA, n = length(v)))
+  c(rank = unname(rank(-v, ties.method = "min")[cand]), sim = unname(v[cand]), n = length(v))
+}
+# same, but excluding one column (used to drop the same-name Day9 persister)
+row_rank_excl <- function(S, q, cand, excl) {
+  if (is.null(S) || !(q %in% rownames(S))) return(c(rank = NA, n = NA))
+  v <- S[q, ]; v <- v[is.finite(v)]; v <- v[setdiff(names(v), excl)]
+  if (!(cand %in% names(v))) return(c(rank = NA, n = length(v)))
+  c(rank = unname(rank(-v, ties.method = "min")[cand]), n = length(v))
+}
+```
+
+```{r ground-truth}
+gt <- tibble::tribble(
+  ~origin,    ~cognate,  ~compartment,
+  "Fibro 6",  "IAF 2",   "crypt base (MU)",
+  "Fibro 2",  "IAF 4",   "crypt top (MU)",
+  "Fibro 7",  "Fibro 4", "submucosa (SM/ME)"
+)
+col_order_d9 <- c("Fibro 6", "Fibro 13", "Fibro 2", "IAF 2", "IAF 3", "IAF 4",
+                  "Fibro 7", "Fibro 4", "Fibro 5", "Fibro 12", "Fibro 1",
+                  "Fibro 15", "Pericyte 1", "Pericyte 2", "IAF 1", "FRC")
+```
+
+# Load and cache all slices
+
+```{r load}
+day0_slices <- list.files(per_slice_xyt_dir,
+  pattern = "^Healthy_all_per_slice_.*_MU_xyt_mapped\\.csv$") %>%
+  str_remove("^Healthy_all_per_slice_") %>% str_remove("_MU_xyt_mapped\\.csv$") %>%
+  unique() %>% { .[str_detect(., "_D0_")] } %>% sort()
+day9_slices <- list.files(per_slice_xyt_dir,
+  pattern = "^DSS9_all_per_slice_.*_MU_xyt_mapped\\.csv$") %>%
+  str_remove("^DSS9_all_per_slice_") %>% str_remove("_MU_xyt_mapped\\.csv$") %>%
+  unique() %>% sort()
+
+day0_by_slice <- setNames(lapply(day0_slices, read_fibro, prefix = "Healthy_all"), day0_slices)
+day9_by_slice <- setNames(lapply(day9_slices, read_fibro, prefix = "DSS9_all"), day9_slices)
+
+cat(sprintf("Day0 slices: %d   Day9 slices: %d   →  up to %d slice-pair comparisons\n",
+            length(day0_slices), length(day9_slices),
+            length(day0_slices) * length(day9_slices)))
+```
+
+# Full paired-slice computation (10 × 21)
+
+```{r paired-run}
+pairs_grid <- expand.grid(d0 = day0_slices, d9 = day9_slices, stringsAsFactors = FALSE)
+
+paired <- pmap_dfr(pairs_grid, function(d0, d9) {
+  datp <- bind_rows(day0_by_slice[[d0]] %>% mutate(grp = "A"),
+                    day9_by_slice[[d9]] %>% mutate(grp = "B"))
+  S <- three_step(datp, CFG, query_rows = gt$origin, col_order = col_order_d9)
+  if (is.null(S)) return(tibble())
+  pmap_dfr(gt, function(origin, cognate, compartment) {
+    r  <- row_rank(S, origin, cognate)
+    re <- row_rank_excl(S, origin, cognate, origin)   # drop same-name persister
+    tibble(
+      d0 = d0, d9 = d9, origin = origin, cognate = cognate, compartment = compartment,
+      rank = unname(r["rank"]), n_cand = unname(r["n"]), sim = unname(r["sim"]),
+      norm_rank = ifelse(is.finite(r["rank"]) & r["n"] > 1,
+                         (r["rank"] - 1) / (r["n"] - 1), NA_real_),
+      rank_excl = unname(re["rank"]), n_excl = unname(re["n"])
+    )
+  })
+})
+
+cat(sprintf("Computed %d slice pairs; %d of %d ground-truth tests are testable (origin & target both >=30 cells).\n",
+            nrow(pairs_grid),
+            sum(is.finite(paired$rank)),
+            nrow(pairs_grid) * nrow(gt)))
+```
+
+## Testable coverage per ground-truth pair
+
+```{r coverage}
+kable(
+  paired %>% group_by(origin, cognate, compartment) %>%
+    summarise(testable_pairs = sum(is.finite(rank)),
+              of_possible = n(), .groups = "drop"),
+  caption = "How many of the (up to) 210 Day0–Day9 slice pairs are testable for each ground-truth linkage (both the Day0 origin and the Day9 target reach >=30 cells)."
+)
+```
+
+# Main result — rank recovery of ground-truth pairs
+
+```{r summary-table}
+summary_tbl <- paired %>% filter(is.finite(rank)) %>%
+  group_by(origin, cognate, compartment) %>%
+  summarise(
+    n_pairs        = n(),
+    cand_range     = paste0(min(n_cand), "-", max(n_cand)),
+    median_rank    = median(rank),
+    mean_rank      = round(mean(rank), 2),
+    mean_norm_rank = round(mean(norm_rank, na.rm = TRUE), 3),
+    pct_top1       = round(100 * mean(rank == 1)),
+    pct_top3       = round(100 * mean(rank <= 3)),
+    pct_top5       = round(100 * mean(rank <= 5)),
+    # supplementary: rank once the un-polarized same-name persister is removed
+    median_rank_no_persister = median(rank_excl, na.rm = TRUE),
+    pct_top1_no_persister    = round(100 * mean(rank_excl == 1, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(pair = paste0(origin, " → ", cognate)) %>%
+  select(pair, compartment, n_pairs, cand_range, median_rank, mean_rank,
+         mean_norm_rank, pct_top1, pct_top3, pct_top5,
+         median_rank_no_persister, pct_top1_no_persister)
+
+kable(summary_tbl,
+      caption = "Ground-truth recovery across all testable Day0–Day9 slice pairs. rank/norm_rank = row-wise position of the cognate Day9 target among ALL Day9 candidates (1 = best; norm 0 = best, 1 = worst). pct_topK = % of slice pairs where the cognate is within top K. Last two columns show rank after removing the un-polarized same-name Day9 persister (orientation only).")
+```
+
+```{r headline, echo=FALSE, results='asis'}
+cat("**Headline.** For each linkage, the cognate Day9 target's standing among *all* Day9 fibroblast/IAF candidates, pooled over the paired slices:\n\n")
+for (i in seq_len(nrow(summary_tbl))) {
+  s <- summary_tbl[i, ]
+  cat(sprintf("- **%s** (%s): median rank %s of ~%s candidates, normalized rank %.2f, Top-3 in **%d%%** and Top-5 in **%d%%** of %d slice pairs.\n",
+              s$pair, s$compartment, s$median_rank, sub("-.*", "", s$cand_range),
+              s$mean_norm_rank, s$pct_top3, s$pct_top5, s$n_pairs))
+}
+```
+
+# Visualizing all 210 paired comparisons
+
+```{r grid-heatmap, fig.width=10, fig.height=11}
+paired %>%
+  mutate(gt_pair = paste0(origin, " → ", cognate),
+         gt_pair = factor(gt_pair, levels = paste0(gt$origin, " → ", gt$cognate)),
+         d0 = factor(d0, levels = rev(day0_slices)),
+         d9 = factor(d9, levels = day9_slices)) %>%
+  ggplot(aes(d9, d0, fill = norm_rank)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = ifelse(is.finite(rank), rank, "")), size = 2.6) +
+  facet_wrap(~ gt_pair, ncol = 1) +
+  scale_fill_gradient(low = "#1a9850", high = "#f7f7f7", na.value = "grey88",
+                      limits = c(0, 1), name = "norm_rank\n(0=best)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+        axis.text.y = element_text(size = 7),
+        panel.grid = element_blank()) +
+  labs(title = "Cognate Day9 target rank across all Day0 × Day9 slice pairs",
+       subtitle = "Rows = Day0 slice, Columns = Day9 slice; number = row-wise rank among all Day9 candidates (lower = better); green = good.",
+       x = "Day9 (DSS) slice", y = "Day0 (Healthy) slice")
+```
+
+```{r dist-plots, fig.width=9, fig.height=4.5}
+pd <- paired %>% filter(is.finite(norm_rank)) %>%
+  mutate(gt_pair = factor(paste0(origin, " → ", cognate),
+                          levels = paste0(gt$origin, " → ", gt$cognate)))
+
+ggplot(pd, aes(gt_pair, norm_rank, fill = gt_pair)) +
+  geom_violin(alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.16, outlier.size = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_y_reverse() +
+  theme_bw() + theme(legend.position = "none") +
+  labs(title = "Distribution of normalized rank of the cognate target across slice pairs",
+       subtitle = "0 (top) = cognate is the single best Day9 match; higher = lower in the ranked list.",
+       x = NULL, y = "Normalized rank (0 best → 1 worst)")
+
+ggplot(pd, aes(rank, fill = gt_pair)) +
+  geom_bar() +
+  facet_wrap(~ gt_pair, ncol = 3, scales = "free_y") +
+  scale_x_continuous(breaks = 1:16) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(title = "Raw row-wise rank of the cognate Day9 target (count of slice pairs)",
+       x = "Rank among all Day9 candidates (1 = best)", y = "Number of slice pairs")
+```
+
+# Interpretation and caveats
+
+```{r interp, echo=FALSE, results='asis'}
+cat('
+**Reading the result.** The method "recovers" a ground-truth linkage to the
+extent that the cognate Day9 target sits near the top of the Day0 origin\'s
+row-wise ranking among *all* Day9 fibroblast/IAF candidates, consistently across
+the paired slices (low median/normalized rank, high Top-3/Top-5 rates in the
+table and the green-dominated grid rows).
+
+**Caveats:**
+
+1. *Persister ceiling on rank 1.* Day9 still contains un-polarized Fibro 6/2/7,
+   which are spatially near-identical to their Day0 selves and therefore usually
+   occupy rank 1 in their own row. The cognate IAF can then be at best rank 2 even
+   under perfect recovery. The `*_no_persister` columns show the rank once that
+   same-name column is removed; the grid/Top-K use the full candidate set as
+   requested.
+2. *1-D crypt resolution.* In MU, IAF2 (r≈0.47) and IAF4 (r≈0.53) differ by only
+   ~0.06, so the two crypt IAFs are harder to separate and per-pair rank is
+   noisier for Fibro 6/Fibro 2 than for the layer-separated Fibro 7 → Fibro 4.
+3. *Coverage.* IAF4 clears the >=30-cell bar in fewer Day9 slices, so the
+   Fibro 2 → IAF4 linkage is evaluated on fewer of the 210 pairs (see coverage).
+4. *Spatial, not lineage.* High rank supports the spatial prediction of the
+   published polarization; it is co-localization evidence, not lineage proof
+   (which the paper establishes by Cxcl12 tracing).
+')
+```
+
+```{r session, echo=FALSE}
+sessionInfo()
+```

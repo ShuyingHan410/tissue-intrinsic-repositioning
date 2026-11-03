@@ -1,0 +1,224 @@
+---
+title: "Imanishi 2025 skin MERFISH (MC903 / oxazolone dermatitis): data overview and layer definitions"
+subtitle: "16 full-thickness strips. Layers built from depth (label-blind) versus the authors' neighbourhood clusters (composition-derived)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.align = "center", dpi = 96)
+suppressMessages({ library(data.table); library(ggplot2); library(patchwork); library(knitr); library(FNN) })
+ROOT <- if (dir.exists("data")) "." else ".."
+d <- fread(file.path(ROOT, "data", "mc903_cells.csv.gz"))
+ORDER <- c("WT_Ear","WT_Neck","WT_Flank","d0_WT_neck","d3_MC903_neck","d6_MC903_neck","d9_MC903_Ear","d9_MC903_Neck","d9_MC903_Flank",
+           "d12_MC903_neck","d10_OXA_Ear","d10_OXA_Neck","d10_OXA_Flank","d16_OXA_Ear","d16_OXA_Neck","d16_OXA_Flank")
+d[, sample := factor(sample, levels = ORDER)]; d[, site := tolower(site)]
+d[, class := fcase(grepl("^KC", celltype_broad), "Keratinocyte", grepl("^HF|^SG", celltype_broad), "Hair follicle / sebaceous",
+                   grepl("^FIB", celltype_broad), "Fibroblast", celltype_broad == "Adipocyte", "Adipocyte", celltype_broad == "Chondrocyte", "Cartilage",
+                   celltype_broad %in% c("SM","Pericyte","VEC","LEC","Schwann","MEL"), "Vessel / muscle / nerve", default = "Immune")]
+
+# Layer labels: defined once in code/skin_layers.R (depth compartments = system A; neighbourhood naming/collapse = system B).
+# The logic and the reasons for every cut are documented there.
+source(file.path(ROOT, "code", "skin_layers.R"))
+d <- assign_skin_layers(d); B <- attr(d, "bounds")[order(match(sample, ORDER))]; CC <- SKIN_CC
+d[, sample := factor(sample, levels = ORDER)]
+
+# palettes for populations
+PAL_CLASS <- c("Keratinocyte" = "#d62728", "Hair follicle / sebaceous" = "#ff7f0e", "Fibroblast" = "#1f77b4", "Adipocyte" = "#f7e300",
+               "Cartilage" = "#7f7f7f", "Vessel / muscle / nerve" = "#9467bd", "Immune" = "#2ca02c")
+PAL_FIB <- c("KC (reference)" = "grey85", FIB = "#9ecae1", FIB_Papillary = "#e41a1c", FIB_Reticular = "#377eb8", FIB_Subcutis = "#f7e300",
+             FIB_Subfascia = "#984ea3", FIB_DS = "#ff7f00", FIB_DP = "#a65628", FIB_Cycling = "#999999", FIB_ProInf = "#000000")
+PAL_KC <- c("KC_IFE" = "#1f77b4", "KC_Stressed_Basal" = "#ff7f0e", "KC_Stressed_Cycling" = "#2ca02c", "KC_Stressed_Diff" = "#d62728",
+            "HF / sebaceous" = "grey80", "other (reference)" = "grey95")
+IMM <- c("MAC","DC","Neutrophil","Mast","Basophil","LC","NK","ILC2","TC_gdt","TC_Treg","TC_Th17","TC_Cd4","TC_Cd8","TC_Cyc","Lymphocyte")
+PAL_IMM <- setNames(c("#1f77b4","#aec7e8","#2ca02c","#ff7f0e","#000000","#8c564b","#e377c2","#bcbd22","#17becf","#9467bd","#d62728","#ff9896","#c49c94","#7f7f7f","#dbdb8d"), IMM)
+
+# rotate every strip so its long axis is horizontal and the epidermis is at the TOP
+rot <- function(x) {
+  pc <- prcomp(cbind(x$x, x$y))$rotation; u <- cbind(x$x, x$y) %*% pc
+  k <- x$class == "Keratinocyte"; if (sum(k) > 20 && median(u[k, 2]) < median(u[!k, 2])) u[, 2] <- -u[, 2]
+  x[, `:=`(u = u[, 1] - min(u[, 1]), v = u[, 2] - min(u[, 2]))]; x
+}
+d <- rbindlist(lapply(split(d, d$sample), rot)); d[, sample := factor(sample, levels = ORDER)]
+d[, c("length_mm", "thick_mm") := .(round(diff(range(u)) / 1000, 1), round(diff(range(v)) / 1000, 1)), by = sample]
+
+base <- function(x, pt) ggplot(x, aes(u, v)) + geom_point(size = pt) + coord_equal(expand = FALSE) + theme_bw(8) +
+  theme(axis.title = element_blank(), legend.key.size = unit(.35, "cm"), legend.text = element_text(size = 7), legend.title = element_blank(),
+        plot.title = element_text(size = 9)) + guides(colour = guide_legend(override.aes = list(size = 2.5), ncol = 1))
+p_depth <- function(x, pt) { x <- copy(x)[, L := ifelse(celltype == "Chondrocyte", "CART (ref)", as.character(layer_depth))]
+  base(x[order(L == "CART (ref)")], pt) + aes(colour = L) + scale_colour_manual(values = PAL5, drop = FALSE) + ggtitle("depth compartments (label-blind): EPI | PAP upper 40% of dermis | RET to fat onset | SUB | SUBFAS below panniculus") }
+p_nn3   <- function(x, pt) base(x, pt) + aes(colour = layer_nn) + scale_colour_manual(values = PAL_NN3, drop = FALSE) + ggtitle("authors' neighbourhood collapsed to layers (composition-derived)")
+p_nn    <- function(x, pt) base(x, pt) + aes(colour = name) + scale_colour_manual(values = PAL_NN, drop = FALSE) + ggtitle("authors' neighbourhood clusters (CellCharter k = 11), named")
+p_class <- function(x, pt) base(x[order(class == "Immune")], pt) + aes(colour = class) + scale_colour_manual(values = PAL_CLASS, drop = FALSE) + ggtitle("broad cell class")
+p_fib   <- function(x, pt) { x <- copy(x)[, f := ifelse(grepl("^FIB", celltype), celltype, ifelse(class == "Keratinocyte", "KC (reference)", NA))][!is.na(f)]
+  base(x[order(f != "KC (reference)", f == "FIB_ProInf")], pt) + aes(colour = f) + scale_colour_manual(values = PAL_FIB, drop = FALSE) + ggtitle("fibroblast subtypes (pro-inflammatory = black)") }
+p_kc    <- function(x, pt) { x <- copy(x)[, k := fcase(celltype %in% names(PAL_KC), celltype, grepl("^HF|^SG", celltype_broad), "HF / sebaceous", default = "other (reference)")]
+  base(x[order(k %in% c("other (reference)", "HF / sebaceous"), decreasing = TRUE)], pt) + aes(colour = k) + scale_colour_manual(values = PAL_KC, drop = FALSE) + ggtitle("keratinocyte states") }
+p_imm   <- function(x, pt) { x <- copy(x)[, i := ifelse(celltype %in% IMM, celltype, ifelse(class == "Keratinocyte", "KC (reference)", NA))][!is.na(i)]
+  base(x[order(i != "KC (reference)")], pt) + aes(colour = i) + scale_colour_manual(values = c(PAL_IMM, "KC (reference)" = "grey85"), drop = FALSE) + ggtitle("immune populations") }
+window <- function(x, width_um = 2500) { c0 <- median(x$u); x[abs(u - c0) < width_um / 2] }
+pct <- function(dt, row, col) dcast(dt[, .N, by = c(row, col)][, p := round(100 * N / sum(N)), by = row], as.formula(paste(row, "~", col)), value.var = "p", fill = 0)
+```
+
+# 1. What the data contain
+
+One Seurat object from Mendeley (doi 10.17632/s3hgv4fp7c.1): 404,283 MERFISH cells (plus 27,571 scRNA-seq cells, dropped here), 500-gene panel,
+FFPE, 3 MERSCOPE runs. Per-cell table exported to `data/mc903_cells.csv.gz`:
+
+| column | what it is | levels |
+|---|---|---|
+| `cell` | cell id (run date + Baysor entity id) | 404,283 |
+| `sample` | tissue strip; one section per condition x site | 16 |
+| `timepoint`, `condition`, `site` | Untreated / MC903 d3 d6 d9 d12 / OXA d10 d16; WT / MC903 / OXA; ear, neck, flank | 7 / 3 / 3 |
+| `rundate` | MERSCOPE run (slide); strips on one run share a coordinate frame | 3 |
+| `x`, `y` | cell centroid, micrometres, slide frame | |
+| `celltype_broad`, `celltype` | authors' annotation; fine level has FIB_Papillary / Reticular / Subcutis / Subfascia / ProInf and KC_IFE / KC_Stressed_* | 26 / 42 |
+| `cc11` | authors' CellCharter neighbourhood cluster (k = 11) | 11 |
+| `n_counts`, `n_genes`, `volume` | per-cell QC | |
+
+**There is no anatomical layer label.** The paper describes papillary dermis, reticular dermis, subcutis and subfascia (Fig. 2G) but only as fibroblast
+subtypes, not as a region label on every cell. The neighbourhood cluster is the only region-like label and it is derived from the cell types around
+each cell. So two layer systems are built below: **A. depth compartments** (what the method uses) and **B. the neighbourhood collapse** (the authors'
+labels, as a comparator, built the way MU/SM/ME were built in the colon). Mouse id is also absent: one section per strip.
+
+# 2. The 16 strips
+
+```{r samples}
+tab <- d[, .(cells = .N, length_mm = length_mm[1], thickness_mm = thick_mm[1], fibroblasts = sum(class == "Fibroblast"),
+             papillary = sum(celltype == "FIB_Papillary"), reticular = sum(celltype == "FIB_Reticular"), pro_inflam = sum(celltype == "FIB_ProInf"),
+             KC_IFE = sum(celltype == "KC_IFE"), KC_stressed = sum(grepl("^KC_Stressed", celltype))), by = .(sample, condition, timepoint, site, rundate)][order(sample)]
+kable(tab, caption = "One section per strip. Length / thickness: extents of the rotated strip (epidermis along the top edge).")
+```
+
+# 3. Layer system A: depth compartments (label-blind)
+
+**Rule.** depth = distance from the nearest keratinocyte of the connected epidermal sheet in the same strip (the sheet is the surface anchor, as the
+lumen is in the colon; keratinocytes within 40 um of each other are linked and only components of >= 300 cells count, which drops hair-follicle bulbs
+that carry keratinocyte labels deep in the tissue). EPI: depth <= 10 um. PAP: the upper 40% of the dermis, i.e. 10 um to 0.4 x fat onset. RET: the lower 60%, down to the fat onset.
+SUB: fat onset to the panniculus carnosus. SUBFAS: below the panniculus. Fat onset = 10th percentile of adipocyte depth per strip (dermal white
+adipose tissue); panniculus = median depth of the strip's muscle cells. Fat and muscle are landmarks, not populations under test. The papillary cut is
+relative rather than a fixed micrometre value because mouse dermis is only 120-190 um thick (a human 100 um cut would swallow the reticular dermis) and
+because the dermis thickens with oedema; 0.4 is a histological convention, not fitted to the fibroblast labels (normal papillary median depth 34 um,
+reticular 70 um; sensitivity at 0.3 / 0.5 to follow). Ear cartilage is overlaid in grey: it splits the ear into two faces, so ear depths beyond ~100 um are not comparable.
+
+```{r bounds}
+cnt <- dcast(d[, .N, by = .(sample, layer_depth)], sample ~ layer_depth, value.var = "N", fill = 0)
+kable(merge(B, cnt, by = "sample")[order(sample)], caption = "Per-strip boundaries (um) and cells per compartment. b_fas = Inf: no panniculus captured, so no subfascia. Ear strips: cartilage in the middle, deep compartments unreliable.")
+```
+
+```{r depth_density, fig.width = 13, fig.height = 5.5}
+fd <- d[celltype %in% c("FIB_Papillary", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia", "FIB_ProInf") & depth < 600 & site != "ear"]
+fd[, condition := factor(condition, levels = c("WT", "MC903", "OXA"))]
+ggplot(fd, aes(depth, colour = celltype)) + geom_density(adjust = 1.2, linewidth = .8) + facet_wrap(~ condition, nrow = 1) +
+  geom_vline(xintercept = c(10, PAP_FRAC * median(B$b_sub), median(B$b_sub)), linetype = 2, colour = "grey50") + scale_colour_manual(values = PAL_FIB) + theme_bw(10) +
+  labs(x = "depth from keratinocyte edge (um); dashed = EPI/PAP, PAP/RET and RET/SUB cuts at the median strip", y = "density", colour = NULL,
+       title = "Fibroblast subtypes along depth (neck + flank). Normal: papillary < reticular < subcutis < subfascia. Disease: pro-inflammatory fibroblasts fill the papillary/upper reticular band")
+```
+
+# 4. Layer system B: the authors' neighbourhood clusters, and how they were named
+
+**Logic of the labels.** Each CellCharter cluster was named from four things: its cell-type composition (table below, top three types), its median
+depth from the keratinocyte edge, whether it exists in normal skin (NN) or appears with disease (IAN), and the paper's own description (NN1 epidermis,
+NN2 upper pilosebaceous unit, NN3 dermis, NN4 subcutis, NN5 ear cartilage; IAN1-6 inflammation-associated). The collapse to EPI / DER / SUB / CART then
+follows depth, exactly as MU1-11 -> MU in the colon. Two of the paper's names are misleading on the data: cluster 0 ("upper dermis") sits at the
+dermo-epidermal junction (median depth 11 um), and cluster 10 ("deep") sits at 88 um, the same depth as the other inflamed-dermis cluster.
+
+```{r cc_table}
+comp <- d[, .N, by = .(cc11, celltype_broad)][, p := round(100 * N / sum(N)), by = cc11][order(cc11, -p)][, head(.SD, 3), by = cc11][, .(composition = paste0(celltype_broad, " ", p, "%", collapse = ", ")), by = cc11]
+dep  <- d[, .(median_depth_um = round(median(depth, na.rm = TRUE)), pct_normal = round(100 * mean(condition == "WT"), 1)), by = cc11]
+prev <- dcast(d[, .N, by = .(cc11, condition)][, p := round(100 * N / sum(N)), by = condition], cc11 ~ condition, value.var = "p", fill = 0)
+setnames(prev, c("WT", "MC903", "OXA"), c("pct_of_normal_cells", "pct_of_MC903_cells", "pct_of_OXA_cells"))
+cct <- Reduce(function(a, b) merge(a, b, by = "cc11"), list(CC, comp, dep[, .(cc11, median_depth_um)], prev))[match(CC$cc11, cc11)]
+kable(cct[, .(cc11, name, layer_nn, composition, median_depth_um, pct_of_normal_cells, pct_of_MC903_cells, pct_of_OXA_cells, reading)],
+      caption = "Cluster -> name -> collapsed layer, with the evidence used (composition, depth, prevalence) and the biological reading.")
+```
+
+The clusters are **states, not places**: cluster 1 (normal epidermis) is replaced by cluster 9 (stressed epidermis), cluster 4 (normal dermis) by
+clusters 2 and 10 (inflamed dermis). These are the skin counterparts of MU1-3 -> MU4/MU6-8 in the DSS colon, and they are what the method's
+output should be checked against, not an input it conditions on.
+
+# 5. Why the method uses system A
+
+```{r compare}
+k1 <- pct(d[condition == "WT" & celltype %in% c("FIB_Papillary", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia") & site != "ear"], "celltype", "layer_depth")
+k2 <- pct(d[condition != "WT" & celltype == "FIB_ProInf" & site != "ear"], "celltype", "layer_depth")
+kable(rbind(k1, k2, fill = TRUE), caption = "A. Depth compartments: % of each fibroblast population (normal subtypes; pro-inflammatory in disease), neck + flank")
+k3 <- pct(d[condition == "WT" & celltype %in% c("FIB_Papillary", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia") & site != "ear"], "celltype", "layer_nn")
+k4 <- pct(d[condition != "WT" & celltype == "FIB_ProInf" & site != "ear"], "celltype", "layer_nn")
+kable(rbind(k3, k4, fill = TRUE), caption = "B. Neighbourhood collapse: the same populations")
+```
+
+```{r leak, fig.width = 16, fig.height = 11}
+# Figure: the same composition-derived labelling applied to colon and skin, measured against the anatomy (depth from the epithelial sheet).
+source(file.path(ROOT, "code", "leak_figure.R"))
+colon_csv <- file.path(ROOT, "..", "all_slices", "062921_D0_m3a_1_slice_1.csv")
+if (file.exists(colon_csv)) { pl <- leak_figure(d, colon_csv); print(pl); ggsave(file.path(ROOT, "output", "leak_figure.png"), pl, width = 16, height = 11, dpi = 110) } else cat("colon slice not found:", colon_csv)
+```
+
+**Reading the figure.** In the colon the neighbourhood prefixes MU / SM / ME were also composition-derived, but the mucosa is the crypt-bearing zone:
+every lamina-propria cell is within a few micrometres of crypt epithelium, the submucosa begins where the crypts end, and the muscularis externa lies
+beyond. The composition window therefore switches labels exactly where the histology switches, Fibro 2 falls inside MU and Fibro 7 beyond it, and
+the leak into the layer term is harmless. In the skin the equivalent boundary is the dermo-epidermal junction, but the 40-cell window around a cell
+just below it is still dominated by keratinocytes, so the "epidermis" neighbourhood extends tens of micrometres into the dermis and covers the papillary
+fibroblast peak. The label follows the composition, not the junction, and papillary versus reticular is not resolved at all.
+
+Under the depth compartments papillary fibroblasts are dermal (PAP) and pro-inflammatory fibroblasts occupy PAP/RET, the band the paper says they
+arise in. Under the neighbourhood collapse most papillary fibroblasts are called "epidermis" because the 40-cell composition window around them is
+keratinocyte-dominated, while pro-inflammatory fibroblasts are "dermis": a layer-overlap term built on system B would penalise the true
+papillary -> pro-inflammatory pair. System B also cannot separate papillary from reticular at all. This is the information-leakage argument in
+one table: layers must come from anatomy, and the neighbourhood labels belong on the output side as ground truth for the state transitions.
+
+# 6. Cell-population composition per strip
+
+```{r composition, fig.width = 13, fig.height = 7}
+cmp <- d[, .N, by = .(sample, class)][, p := N / sum(N), by = sample]
+a <- ggplot(cmp, aes(sample, p, fill = class)) + geom_col() + scale_fill_manual(values = PAL_CLASS) + theme_bw(9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") + labs(x = NULL, y = "fraction of cells", fill = NULL, title = "broad class")
+fb <- d[grepl("^FIB", celltype), .N, by = .(sample, celltype)][, p := N / sum(N), by = sample]
+b <- ggplot(fb, aes(sample, p, fill = celltype)) + geom_col() + scale_fill_manual(values = PAL_FIB) + theme_bw(9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") + labs(x = NULL, y = "fraction of fibroblasts", fill = NULL, title = "fibroblast subtypes")
+a + b
+```
+
+```{r layer_share, fig.width = 13, fig.height = 4.5}
+ls <- d[, .N, by = .(sample, layer_depth)][, p := N / sum(N), by = sample]
+ggplot(ls, aes(sample, p, fill = layer_depth)) + geom_col() + scale_fill_manual(values = PAL5) + theme_bw(9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + labs(x = NULL, y = "fraction of cells", fill = NULL, title = "depth-compartment share per strip (subfascia only where the panniculus was captured)")
+```
+
+# 7. Each strip {.tabset}
+
+Strips rotated so the epidermis runs along the top edge. First the whole strip by depth compartment (subsampled to 25,000 cells); then a 2.5 mm
+central window, all cells: depth compartments vs neighbourhood collapse, neighbourhood clusters vs broad class, fibroblast subtypes vs keratinocyte
+states, immune populations.
+
+```{r strips, results = "asis", fig.width = 15, fig.height = 4.2}
+for (s in ORDER) {
+  x <- d[sample == s]; b <- B[sample == s]
+  cat(sprintf("\n\n## %s {.tabset}\n\n%s, %s, %d cells, %.1f x %.1f mm. Fat onset %d um; panniculus %s.\n\n", s, x$timepoint[1], x$site[1], nrow(x),
+              x$length_mm[1], x$thick_mm[1], b$b_sub, if (is.finite(b$b_fas)) paste(b$b_fas, "um") else "not captured"))
+  set.seed(1); xs <- if (nrow(x) > 25000) x[sort(sample(.N, 25000))] else x
+  print(p_depth(xs, .25) + ggtitle(paste(s, "- whole strip, depth compartments")))
+  w <- window(x)
+  cat("\n\n**Central 2.5 mm window, all cells**\n\n")
+  print(p_depth(w, .6) | p_nn3(w, .6))
+  print(p_nn(w, .6) | p_class(w, .6))
+  print(p_fib(w, .7) | p_kc(w, .6))
+  print(p_imm(w, .7) | plot_spacer())
+}
+```
+
+# 8. Reading guide
+
+* **Normal strips**: EPI (red) along the top, PAP (orange) the upper 40% of the dermis with the papillary fibroblasts, RET (blue) with reticular
+  fibroblasts and the pilosebaceous units, SUB (yellow) from the first fat, SUBFAS (purple) below the panniculus where it was captured. The neighbourhood
+  collapse gives only EPI / DER / SUB and puts the papillary band into EPI.
+* **MC903 d3 -> d6 -> d9 -> d12**: epidermis becomes stressed keratinocytes, papillary fibroblasts disappear and PAP/RET fill with pro-inflammatory
+  fibroblasts (black) and macrophage/DC-rich inflamed dermis; neutrophil state and anagen follicles appear with oxazolone. The band thickens with
+  oedema (OXA d16 ear 5.4 mm), so depth should be normalised within each strip before comparing sections, as in the kidney.
+* **What to feed the method**: `layer_depth` as the layer, depth (or a MorphoGAM curve along the epidermis) as the within-layer coordinate,
+  `celltype` as the population; `cc11` / `layer_nn` only as the authors'-label comparator and as ground truth for the state transitions.

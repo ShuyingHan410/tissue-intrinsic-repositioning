@@ -1,0 +1,580 @@
+---
+title: "Applying the framework to a second tissue: type 2 skin inflammation (MERFISH, Imanishi et al. 2025, Cell Reports)"
+subtitle: "What the paper claims, what tissue-intrinsic coordinates recover with no registration and no expression, and what the gene-level test adds"
+author: "Shuying Han"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center", dpi = 110)
+suppressMessages({ library(data.table); library(ggplot2); library(patchwork); library(knitr); library(FNN) })
+set.seed(1)
+source("../../script/common/threestep_engine.R", local = TRUE)      # the colon engine, unchanged
+CFG$min_cells <- 30
+FIG <- "figs_application"; dir.create(FIG, showWarnings = FALSE)
+N_PERM <- 200; N_SIM <- 500; N_SHUF <- 200; SE_MAX <- 0.05; MIN_CELLS <- 30
+
+ORD <- c("WT_Neck", "d0_WT_neck", "d3_MC903_neck", "d6_MC903_neck", "d9_MC903_Neck", "d12_MC903_neck", "d10_OXA_Neck", "d16_OXA_Neck",
+         "WT_Flank", "d9_MC903_Flank", "d10_OXA_Flank", "d16_OXA_Flank", "WT_Ear", "d9_MC903_Ear", "d10_OXA_Ear", "d16_OXA_Ear")
+DAY <- c(WT_Neck = 0, d0_WT_neck = 0, d3_MC903_neck = 3, d6_MC903_neck = 6, d9_MC903_Neck = 9, d12_MC903_neck = 12, d10_OXA_Neck = 10, d16_OXA_Neck = 16,
+         WT_Flank = 0, d9_MC903_Flank = 9, d10_OXA_Flank = 10, d16_OXA_Flank = 16, WT_Ear = 0, d9_MC903_Ear = 9, d10_OXA_Ear = 10, d16_OXA_Ear = 16)
+NORMALS <- c("WT_Neck", "d0_WT_neck")
+MC  <- c("d3_MC903_neck", "d6_MC903_neck", "d9_MC903_Neck", "d12_MC903_neck")
+OXA <- c("d10_OXA_Neck", "d16_OXA_Neck")
+FIB  <- c("FIB_Papillary", "FIB_Reticular", "FIB_ProInf", "FIB_DS", "FIB_DP", "FIB_Subcutis", "FIB_Subfascia", "FIB_Cycling")
+FIB5 <- c("FIB_Papillary", "FIB_Reticular", "FIB_ProInf", "FIB_Subcutis", "FIB_Subfascia")
+KC   <- c("KC_IFE", "KC_Stressed_Basal", "KC_Stressed_Cycling", "KC_Stressed_Diff")
+IMM  <- c("Basophil", "Mast", "MAC", "DC", "Neutrophil", "TC_Cd4", "TC_Th17", "TC_Treg", "ILC2", "Lymphocyte")
+DERM <- c("PAP", "RET", "SUB", "SUBFAS"); LAYB <- c("EPI", "DER", "SUB")
+PAL_F <- c(FIB_Papillary = "#e41a1c", FIB_Reticular = "#377eb8", FIB_ProInf = "#000000", FIB_Subcutis = "#f0c800", FIB_Subfascia = "#984ea3",
+           FIB_DS = "#ff7f00", FIB_DP = "#a65628", FIB_Cycling = "#4daf4a")
+PAL_L <- c(EPI = "#f4b6b6", PAP = "#ffd8b0", RET = "#c6dbef", SUB = "#fff7a8", SUBFAS = "#dcc8e8")
+pretty <- function(v) sub("^FIB_", "", sub("^KC_", "", v))
+fmt <- function(v, d = 3) ifelse(is.na(v), "n/a", formatC(v, format = "f", digits = d))
+
+load_fits <- function(dir) {
+  fs <- list.files(dir, pattern = "_xyt_mapped\\.csv$", full.names = TRUE)
+  d <- rbindlist(lapply(fs, fread, select = c("x", "y", "layer", "Tier1", "Tier2", "r_for_jsd", "Slice_ID", "Cell_ID", "depth")), fill = TRUE)
+  d <- d[is.finite(r_for_jsd)]; d[, strip := sub("^s\\d\\d_", "", Slice_ID)]; d[, value := r_for_jsd]; d[, r := r_for_jsd]; d[, day := DAY[strip]]; d }
+x  <- load_fits("../output/morphogam_auto")        # layer system A: depth compartments (the method)
+xB <- load_fits("../output/morphogam_B")           # layer system B: the authors' neighbourhoods collapsed (robustness check)
+rot <- function(d) { pc <- prcomp(cbind(d$x, d$y))$rotation; u <- cbind(d$x, d$y) %*% pc
+  k <- d$Tier1 == "Keratinocyte"; if (sum(k) > 20 && median(u[k, 2]) < median(u[!k, 2])) u[, 2] <- -u[, 2]
+  d[, `:=`(u = u[, 1] - min(u[, 1]), v = u[, 2] - min(u[, 2]))]; d }
+x <- rbindlist(lapply(split(x, x$strip), rot))
+# whole-strip cells (abundance only)
+sl <- rbindlist(lapply(list.files("../all_slices", pattern = "^s\\d\\d_.*\\.csv$", full.names = TRUE), fread, select = c("x", "y", "Tier1", "Tier2", "Slice_ID", "Leiden_neigh")))
+sl[, strip := sub("^s\\d\\d_", "", Slice_ID)]; setnames(sl, "Leiden_neigh", "layer")
+sl <- rbindlist(lapply(split(sl, sl$strip), rot)); sl[, length_mm := diff(range(u)) / 1000, by = strip]
+
+# ---- engine wrappers ----
+sim <- function(d, a, b, types, lays, typesB = types) { layers <<- lays
+  dat <- rbind(d[strip == a & Tier2 %in% types  & layer %in% lays, .(layer, Tier2, value, grp = "A")],
+               d[strip == b & Tier2 %in% typesB & layer %in% lays, .(layer, Tier2, value, grp = "B")])
+  if (!nrow(dat)) return(NULL)
+  three_step(as.data.frame(dat), CFG, unique(c(types, typesB))) }
+rk <- function(M, q, c) if (is.null(M) || !(q %in% rownames(M)) || !(c %in% colnames(M))) NA_integer_ else as.integer(unname(row_rank(M, q, c)["rank"]))
+sv <- function(M, q, c) if (is.null(M) || !(q %in% rownames(M)) || !(c %in% colnames(M))) NA_real_ else unname(row_rank(M, q, c)["sim"])
+longify <- function(M, tag) { if (is.null(M)) return(NULL)
+  d <- as.data.table(as.table(M)); setnames(d, c("from", "to", "sim")); d[, tag := tag]
+  d[, rank := { o <- rep(NA_integer_, .N); f <- is.finite(sim); o[f] <- rank(-sim[f], ties.method = "min"); o }, by = from]; d }
+heat <- function(L, title, ncol = 4, lev = FIB) {
+  L <- copy(L); L[, from := factor(pretty(from), levels = pretty(lev))]; L[, to := factor(pretty(to), levels = pretty(lev))]
+  ggplot(L, aes(to, from, fill = sim)) + geom_tile(colour = "white") + geom_tile(data = L[rank == 1], fill = NA, colour = "black", linewidth = .9) +
+    geom_text(aes(label = ifelse(is.na(sim), "", sprintf("%.2f", sim))), size = 2.7) +
+    facet_wrap(~ tag, ncol = ncol) + scale_fill_gradient(low = "white", high = "firebrick", na.value = "grey92", limits = c(0, 1), name = "similarity") +
+    scale_y_discrete(limits = rev) + theme_bw(9) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "disease population", y = "normal population", title = title, subtitle = "box = top match of the row; grey = fewer than 30 cells on one side") }
+```
+
+```{r compute_similarity, include = FALSE}
+# ---- noise floor ----
+M0 <- sim(x, "WT_Neck", "d0_WT_neck", FIB, DERM); Ms <- sim(x, "WT_Neck", "WT_Flank", FIB, DERM)
+selfsim <- sapply(intersect(rownames(M0), colnames(M0)), function(p) M0[p, p]); band <- range(selfsim, na.rm = TRUE)
+floor <- data.table(comparison = c("WT_Neck vs d0_WT_neck (different mouse and run)", "WT_Neck vs WT_Flank (different site)"),
+                    self_rank1_pct = round(100 * c(diag_rank1(M0), diag_rank1(Ms))),
+                    mean_self_similarity = round(c(mean(selfsim, na.rm = TRUE), mean(sapply(intersect(rownames(Ms), colnames(Ms)), function(p) Ms[p, p]), na.rm = TRUE)), 3))
+# ---- MC903 neck time course, both normal references ----
+MATS <- list(); for (n in NORMALS) for (t in MC) MATS[[paste(n, t)]] <- sim(x, n, t, FIB, DERM)
+PAIRS <- data.table(query = c("FIB_Papillary", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia", "FIB_DS"),
+                    candidate = c("FIB_ProInf", "FIB_ProInf", "FIB_ProInf", "FIB_ProInf", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia", "FIB_DS"),
+                    claim = c("paper: source, early", "paper: source, later", "paper: not a source", "paper: not a source", "identity control", "identity control", "identity control", "identity control"))
+pair_rows <- function(M, n, t) PAIRS[, .(normal = n, disease = t, day = unname(DAY[t]), query, candidate, pair = paste(pretty(query), "->", pretty(candidate)), claim,
+                                         rank = mapply(rk, list(M), query, candidate), sim = round(mapply(sv, list(M), query, candidate), 3))]
+tab <- rbindlist(lapply(names(MATS), function(k) { s <- strsplit(k, " ")[[1]]; pair_rows(MATS[[k]], s[1], s[2]) }))
+traj <- rbindlist(lapply(names(MATS), function(k) { s <- strsplit(k, " ")[[1]]; M <- MATS[[k]]; if (is.null(M) || !"FIB_ProInf" %in% colnames(M)) return(NULL)
+  rbindlist(lapply(intersect(c("FIB_Papillary", "FIB_Reticular", "FIB_Subcutis", "FIB_Subfascia"), rownames(M)), function(q) { v <- M[q, ]; v <- v[is.finite(v)]
+    if (!"FIB_ProInf" %in% names(v)) return(NULL); other <- v[names(v) != "FIB_ProInf"]
+    data.table(normal = s[1], disease = s[2], day = unname(DAY[s[2]]), query = q, S_ProInf = unname(v["FIB_ProInf"]), next_best = names(other)[which.max(other)],
+               margin = unname(v["FIB_ProInf"]) - max(other)) })) }))
+# ---- ProInf split by the compartment it sits in: which normal subtype does each half resemble? ----
+xs <- copy(x)[Tier2 == "FIB_ProInf" & layer %in% c("PAP", "RET"), Tier2 := paste0("FIB_ProInf_", layer)]
+split_tab <- rbindlist(lapply(NORMALS, function(n) rbindlist(lapply(MC, function(t) { layers <<- c("PAP", "RET")
+  dat <- rbind(xs[strip == n & Tier2 %in% c("FIB_Papillary", "FIB_Reticular") & layer %in% c("PAP", "RET"), .(layer, Tier2, value, grp = "A")],
+               xs[strip == t & Tier2 %in% c("FIB_ProInf_PAP", "FIB_ProInf_RET", "FIB_Reticular") & layer %in% c("PAP", "RET"), .(layer, Tier2, value, grp = "B")])
+  M <- three_step(as.data.frame(dat), CFG, c("FIB_Papillary", "FIB_Reticular", "FIB_ProInf_PAP", "FIB_ProInf_RET")); if (is.null(M)) return(NULL)
+  d <- as.data.table(as.table(M)); setnames(d, c("from", "to", "sim")); d[, `:=`(normal = n, day = unname(DAY[t]))]; d }))))
+split_tab <- split_tab[is.finite(sim) & to %in% c("FIB_ProInf_PAP", "FIB_ProInf_RET")]
+# ---- occupancy and abundance ----
+share <- x[Tier2 == "FIB_ProInf" & layer %in% DERM & strip %in% c(MC, OXA), .N, by = .(strip, layer)][, pct := round(100 * N / sum(N)), by = strip]
+abund <- sl[strip %in% c("d0_WT_neck", MC) & Tier2 %in% FIB5, .(cells = .N, per_mm = round(.N / length_mm[1], 1)), by = .(strip, Tier2)][, day := DAY[strip]]
+# ---- oxazolone neck, flank ----
+MO <- list(); for (n in NORMALS) for (t in OXA) MO[[paste(n, t)]] <- sim(x, n, t, FIB, DERM)
+MF <- list(); for (t in c("d9_MC903_Flank", "d10_OXA_Flank", "d16_OXA_Flank")) MF[[paste("WT_Flank", t)]] <- sim(x, "WT_Flank", t, FIB, DERM)
+tabo <- rbindlist(lapply(names(c(MO, MF)), function(k) { s <- strsplit(k, " ")[[1]]; pair_rows(c(MO, MF)[[k]], s[1], s[2]) }))
+# ---- keratinocytes within the epidermis ----
+MK <- list(); for (n in NORMALS) for (t in c(MC, OXA)) MK[[paste(n, t)]] <- sim(x, n, t, KC, "EPI")
+kct <- rbindlist(lapply(names(MK), function(k) { M <- MK[[k]]; if (is.null(M) || !"KC_IFE" %in% rownames(M)) return(NULL); s <- strsplit(k, " ")[[1]]
+  v <- M["KC_IFE", ]; v <- v[is.finite(v)]; o <- order(-v); data.table(normal = s[1], disease = s[2], best = pretty(names(v)[o[1]]), sim = round(v[o[1]], 3), second = pretty(names(v)[o[2]])) }))
+# ---- immune cells vs fibroblasts in the same disease strip ----
+MI <- list(); for (t in c(MC, OXA)) { M <- sim(x, t, t, IMM, DERM, typesB = FIB); if (!is.null(M)) MI[[t]] <- M[intersect(IMM, rownames(M)), intersect(FIB, colnames(M)), drop = FALSE] }
+LI <- rbindlist(lapply(names(MI), function(k) longify(MI[[k]], k)))
+imm_tab <- LI[to == "FIB_ProInf" & !is.na(rank), .(strip = tag, immune = from, rank_ProInf = rank, sim = round(sim, 3))]
+# ---- layer system B (authors' neighbourhoods collapsed), same strips ----
+MB <- list(); for (n in NORMALS) for (t in intersect(MC, unique(xB$strip))) MB[[paste(n, t)]] <- sim(xB, n, t, FIB, LAYB)
+AB <- rbindlist(lapply(names(MB), function(k) { s <- strsplit(k, " ")[[1]]; a <- pair_rows(MATS[[k]], s[1], s[2]); b <- pair_rows(MB[[k]], s[1], s[2])
+  merge(a[, .(normal, day, pair, claim, sim_A = sim, rank_A = rank)], b[, .(normal, day, pair, sim_B = sim, rank_B = rank)], by = c("normal", "day", "pair")) }))
+# ---- headline numbers used in the text ----
+pr <- tab[pair == "Papillary -> ProInf"]; rr <- tab[pair == "Reticular -> ProInf"]
+pap_late <- pr[day >= 6]; ret_late <- rr[day >= 6]
+deep <- tab[query %in% c("FIB_Subcutis", "FIB_Subfascia") & candidate == "FIB_ProInf" & !is.na(rank)]
+ident <- tab[claim == "identity control" & query %in% c("FIB_Subcutis", "FIB_Subfascia") & !is.na(rank)]
+kc_stress <- kct[, .(n = .N, stressed = sum(grepl("Stressed", best)))]
+```
+
+```{r compute_genes, include = FALSE}
+G <- c("Krt1", "Pdgfra", "Adipoq", "Des", "Col8a1", "Tnc", "Cxcl12", "Cxcl1", "Il4ra", "Il13ra1", "Osmr", "Il6st", "Apcdd1", "Pi16", "Dpp4", "Col1a1", "Col3a1", "Postn", "Dpt", "Osm")
+cn <- fread("../data/mc903_counts.csv.gz", select = c("Cell_ID", "total_counts", G))
+xg <- merge(x, cn, by = "Cell_ID"); MED <- median(xg$total_counts)
+for (g in G) set(xg, j = paste0(g, "_n"), value = xg[[g]] / pmax(xg$total_counts, 1) * MED)     # library-size normalisation (this panel has no blank barcodes)
+# the pipeline's delta (gene_spatial_cluster/delta_core.R), unchanged: transcript-weighted mean r minus the mean r of ALL cells of the population
+delta_one <- function(n, r) { N <- length(r); S <- sum(n)
+  if (N < 2 || S <= 0) return(list(delta = NA_real_, se = NA_real_, n_pos = sum(n > 0)))
+  sw2 <- sum(n^2) / S^2 - 1 / N; se <- if (sw2 > 0) sd(r) * sqrt(sw2) else NA_real_
+  list(delta = sum(n * r) / S - mean(r), se = se, n_pos = sum(n > 0)) }
+delta_table <- function(d, genes, by = c("strip", "Tier2", "layer")) {
+  rbindlist(lapply(genes, function(g) { gv <- paste0(g, "_n")
+    d[, { o <- delta_one(get(gv), r); c(list(gene = g, cells = .N, frac_pos = mean(get(g) > 0)), o) }, by = by] }))[
+    , eligible := cells >= MIN_CELLS & is.finite(se) & se > 0 & se < SE_MAX][, z := ifelse(eligible, delta / se, NA_real_)][, delta := ifelse(eligible, delta, NA_real_)][, day := DAY[strip]][] }
+# anatomy check
+wq <- function(v, w, p) { o <- order(v); v <- v[o]; w <- w[o]; cw <- cumsum(w) / sum(w); v[which(cw >= p)[1]] }
+anat <- rbindlist(lapply(c("Krt1", "Pdgfra", "Adipoq", "Des"), function(g) xg[strip %in% c(NORMALS, MC, OXA, "WT_Flank", "d9_MC903_Flank"), .(gene = g, mol = sum(get(g)),
+  wdepth = if (sum(get(g)) > 0) sum(get(g) * depth) / sum(get(g)) else NA_real_, q25 = wq(depth, get(g), .25), q75 = wq(depth, get(g), .75)), by = strip]))[mol >= 50]
+anat[, gene := factor(gene, levels = c("Krt1", "Pdgfra", "Adipoq", "Des"))]; anat[, strip := factor(strip, levels = ORD)]
+anat_ok <- anat[, .(ordered = wdepth[gene == "Krt1"] < wdepth[gene == "Pdgfra"] & wdepth[gene == "Pdgfra"] < min(wdepth[gene %in% c("Adipoq", "Des")])), by = strip]
+# within pro-inflammatory fibroblasts
+GP <- c("Tnc", "Cxcl12", "Cxcl1", "Il4ra", "Il13ra1", "Osmr", "Il6st"); GI <- c("Apcdd1", "Pi16", "Dpp4")
+dp <- delta_table(xg[Tier2 == "FIB_ProInf" & layer %in% c("PAP", "RET", "SUB")], c(GP, GI, "Col1a1", "Col3a1"))
+dpn <- dp[eligible == TRUE & strip %in% MC]
+# lineage contrasts, per pair (one section per time point: no REML pooling possible, exact per-pair SE instead)
+GALL <- c(GP, GI, "Col1a1", "Col3a1", "Postn", "Dpt")
+arm <- delta_table(xg[Tier2 %in% c("FIB_Papillary", "FIB_Reticular", "FIB_ProInf") & layer %in% c("PAP", "RET") & strip %in% c(NORMALS, MC)], GALL)
+mk <- function(parent, daughter, label) rbindlist(lapply(NORMALS, function(n) rbindlist(lapply(MC, function(t) rbindlist(lapply(c("PAP", "RET"), function(ly) {
+  a <- arm[strip == n & Tier2 == parent & layer == ly]; b <- arm[strip == t & Tier2 == daughter & layer == ly]
+  rbindlist(lapply(GALL, function(g) { pa <- a[gene == g]; da <- b[gene == g]
+    full <- nrow(pa) && nrow(da) && isTRUE(pa$eligible) && isTRUE(da$eligible)
+    data.table(contrast = label, gene = g, normal = n, disease = t, day = unname(DAY[t]), layer = ly, route = if (full) "D1_full" else if (nrow(da) && isTRUE(da$eligible)) "daughter_only" else "excluded",
+               delta_parent = if (nrow(pa)) pa$delta else NA_real_, delta_daughter = if (nrow(da)) da$delta else NA_real_,
+               shift = if (full) da$delta - pa$delta else NA_real_, se_shift = if (full) sqrt(da$se^2 + pa$se^2) else NA_real_) })) }))))))
+CT <- rbind(mk("FIB_Papillary", "FIB_ProInf", "papillary (normal) -> ProInf (disease)"), mk("FIB_Reticular", "FIB_ProInf", "reticular (normal) -> ProInf (disease)"))[route == "D1_full"]
+CT[, z := shift / se_shift][, p := 2 * pnorm(-abs(z))][, q := p.adjust(p, "BH"), by = contrast]
+ct_summ <- CT[, .(pairs = .N, mean_shift = round(mean(shift), 3), consistency_pct = round(100 * max(mean(shift > 0), mean(shift < 0))), pairs_q05 = sum(q < .05), min_q = signif(min(q), 2)), by = .(contrast, gene)][order(contrast, -pairs_q05, -consistency_pct)]
+# generalisation units
+dg <- delta_table(xg[Tier2 == "FIB_ProInf" & layer %in% c("PAP", "RET", "SUB") & strip %in% c("d9_MC903_Flank", OXA, "d10_OXA_Flank", "d16_OXA_Flank")], c("Tnc", "Cxcl12", "Apcdd1", "Pi16"))[eligible == TRUE]
+```
+
+```{r compute_nulls, include = FALSE}
+# 1. exact SE vs permutation SD, on the eligible ProInf units of the three primary genes
+units <- dpn[gene %in% c("Tnc", "Cxcl12", "Cxcl1"), .(strip, layer, gene)]
+perm <- rbindlist(lapply(seq_len(nrow(units)), function(i) { uu <- units[i]; d <- xg[strip == uu$strip & Tier2 == "FIB_ProInf" & layer == uu$layer]
+  n <- d[[paste0(uu$gene, "_n")]]; r <- d$r; o <- delta_one(n, r)
+  pm <- replicate(N_PERM, { nn <- sample(n); sum(nn * r) / sum(nn) - mean(r) })
+  data.table(strip = uu$strip, layer = uu$layer, gene = uu$gene, cells = nrow(d), delta = round(o$delta, 3), se_exact = round(o$se, 4), sd_perm = round(sd(pm), 4), ratio = round(sd(pm) / o$se, 2), p_perm = round(mean(abs(pm) >= abs(o$delta)), 3)) }))
+# 2. known gradients on the real ProInf geometry
+BETA <- c(-3, -1.5, 0, 1.5, 3)
+su <- dpn[gene == "Tnc", .(strip, layer)]
+simb <- rbindlist(lapply(seq_len(nrow(su)), function(i) { uu <- su[i]; d <- xg[strip == uu$strip & Tier2 == "FIB_ProInf" & layer == uu$layer]; r <- d$r; mu <- mean(d$Tnc)
+  rbindlist(lapply(BETA, function(b) { lam <- mu / mean(exp(b * r))
+    res <- replicate(N_SIM, { n <- rpois(length(r), lam * exp(b * r)); o <- delta_one(n, r); c(o$delta, o$se) })
+    data.table(unit = paste(uu$strip, uu$layer), cells = length(r), beta = b, mean_delta = mean(res[1, ]), sd_delta = sd(res[1, ]),
+               reject = mean(abs(res[1, ] / res[2, ]) > 1.96, na.rm = TRUE), sign_ok = if (b == 0) NA_real_ else mean(sign(res[1, ]) == sign(b))) })) }))
+simb_s <- simb[, .(mean_delta = round(mean(mean_delta), 3), reject_rate = round(mean(reject), 3), sign_correct = round(mean(sign_ok, na.rm = TRUE), 2), units = .N), by = beta]
+# 3. population moved, gene did not
+mv <- rbindlist(lapply(c("PAP", "RET"), function(ly) { a <- xg[strip == "d0_WT_neck" & Tier2 == "FIB_Reticular" & layer == ly]$r; b <- xg[strip == "d9_MC903_Neck" & Tier2 == "FIB_ProInf" & layer == ly]$r
+  sa <- replicate(N_SIM, { o <- delta_one(rpois(length(a), .5), a); o$delta / o$se }); sb <- replicate(N_SIM, { o <- delta_one(rpois(length(b), .5), b); o$delta / o$se })
+  data.table(layer = ly, mean_r_normal_reticular = round(mean(a), 3), mean_r_disease_ProInf = round(mean(b), 3), reject_normal = round(mean(abs(sa) > 1.96, na.rm = TRUE), 3), reject_disease = round(mean(abs(sb) > 1.96, na.rm = TRUE), 3)) }))
+# 4. a cell-size gradient and no gene gradient: raw vs normalised counts
+sz <- rbindlist(lapply(NORMALS, function(s) { d <- xg[strip == s & Tier2 == "FIB_Papillary" & layer == "PAP"]; r <- d$r; tc <- d$total_counts; lam <- 2 * tc / mean(tc)
+  res <- replicate(N_SIM, { n <- rpois(length(r), lam); o <- delta_one(n, r); on <- delta_one(n / pmax(tc, 1) * MED, r); c(o$delta / o$se, on$delta / on$se) })
+  data.table(strip = s, cells = nrow(d), delta_of_total_counts = round(delta_one(tc, r)$delta, 3), reject_raw = round(mean(abs(res[1, ]) > 1.96, na.rm = TRUE), 2), reject_normalised = round(mean(abs(res[2, ]) > 1.96, na.rm = TRUE), 2)) }))
+# 5. physical proximity of immune cells to ProInf, with a layer-preserving label shuffle among fibroblasts
+IMM5 <- c("Basophil", "Mast", "MAC", "DC", "Neutrophil")
+prox <- rbindlist(lapply(MC, function(t) { d <- x[strip == t & layer %in% DERM]; f <- d[Tier2 %in% FIB]; im <- d[Tier2 %in% IMM5]
+  im <- im[, if (.N >= 30) .SD, by = Tier2]; if (!nrow(im) || sum(f$Tier2 == "FIB_ProInf") < 30) return(NULL)
+  med <- function(lab) { nn <- get.knnx(as.matrix(f[lab == "FIB_ProInf", .(x, y)]), as.matrix(im[, .(x, y)]), k = 1)$nn.dist[, 1]; tapply(nn, im$Tier2, median) }
+  obs <- med(f$Tier2); nm <- names(obs); obs <- as.numeric(obs)
+  nul <- replicate(N_SHUF, { g <- copy(f); g[, Tier2 := sample(Tier2), by = layer]; as.numeric(med(g$Tier2)) }); nul <- matrix(nul, nrow = length(obs))
+  data.table(strip = t, day = unname(DAY[t]), immune = nm, n = as.integer(table(im$Tier2)[nm]), obs_um = round(obs), null_um = round(rowMeans(nul)),
+             ratio = round(obs / rowMeans(nul), 2), p = round(rowMeans(nul <= obs), 3)) }))
+```
+
+## 1. Summary
+
+The framework was built on colon and is tested here on skin, a tissue with a different architecture (flat strips instead of rings), a different
+disease (type 2 dermatitis instead of DSS colitis), a different platform run and a different cell-type vocabulary. Nothing in the engine was changed.
+The one tissue-specific input is the definition of anatomical layers, which in skin is purely geometric (depth from the connected keratinocyte sheet,
+Section 2). Every number in this document is recomputed from the fitted coordinates when it is knitted.
+
+The paper (Imanishi et al. 2025, *Cell Reports* 44:116114) makes its fibroblast claims from abundance and marker expression, not from position. The
+framework reads position only, so where the two agree the agreement is independent evidence; where they disagree, the discrepancy is itself a result.
+
+| paper's claim (its evidence) | positional readout here | verdict |
+|---|---|---|
+| Pro-inflammatory fibroblasts (FIB_ProInf) derive from papillary fibroblasts early and reticular fibroblasts later (proportions, Fig. 2H) | Papillary -> ProInf ranks `r paste(sort(unique(pap_late$rank)), collapse = "/")` from day 6 on (`r sum(pap_late$rank == 1)` of `r nrow(pap_late)` comparisons at rank 1, two normal references); reticular -> ProInf ranks `r paste(sort(unique(ret_late$rank)), collapse = "/")`. Papillary is the closer match at every time point from day 6 (`r fmt(mean(pr[day == 12]$sim), 2)` vs `r fmt(mean(rr[day == 12]$sim), 2)` at day 12). At day 3, before ProInf has expanded, neither resembles it (ranks `r paste(sort(unique(c(pr[day == 3]$rank, rr[day == 3]$rank))), collapse = "/")`). | **Reproduced, with the ordering** |
+| Subcutis and subfascial fibroblasts are not a source (location and expression) | ProInf ranks `r min(deep$rank)`-`r max(deep$rank)` for both at every time point; they rank their own label first in `r round(100 * mean(ident$rank == 1))`% of comparisons, against a normal-vs-normal floor of `r floor$self_rank1_pct[1]`% | **Reproduced** |
+| ProInf "predominantly occupies the reticular dermis" (Fig. 2G, visual) | ProInf sits in the upper dermis, straddling the papillary/reticular boundary: `r min(share[strip %in% MC[-1] & layer == "PAP"]$pct)`-`r max(share[strip %in% MC[-1] & layer == "PAP"]$pct)`% in the papillary compartment and `r min(share[strip %in% MC[-1] & layer == "RET"]$pct)`-`r max(share[strip %in% MC[-1] & layer == "RET"]$pct)`% in the reticular compartment from day 6; within each compartment it lies deeper than the resident population | **Refined**: band-level agreement, with a depth-resolved position the paper does not give |
+| Interfollicular keratinocytes become stressed basal / cycling / differentiated keratinocytes | Within the epidermis the closest disease state to KC_IFE is a stressed state in `r kc_stress$stressed` of `r kc_stress$n` comparisons | **Reproduced** (weak by construction: the sheet is 2-3 cells deep) |
+| MC903 and oxazolone converge on the same pro-inflammatory fibroblast state (transcriptional) | On the oxazolone neck, ProInf ranks `r paste(sort(unique(tabo[grepl("OXA_Neck", disease) & pair == "Papillary -> ProInf"]$rank)), collapse = "/")` for papillary fibroblasts and sits mostly in the subcutis / subfascia (`r share[strip == "d10_OXA_Neck" & layer == "SUB"]$pct`% SUB at day 10, `r share[strip == "d16_OXA_Neck" & layer == "SUBFAS"]$pct`% SUBFAS at day 16) | **Not reproduced positionally**: the same transcriptional state occupies a different niche in the two models |
+| Basophils activate ProInf (neighbourhood analysis, ligand-receptor, depletion) | Among fibroblasts, ProInf is the population whose position basophils share (rank `r paste(imm_tab[immune == "Basophil"]$rank_ProInf, collapse = "/")` at days `r paste(DAY[imm_tab[immune == "Basophil"]$strip], collapse = "/")`); basophils sit `r round(100 * (1 - max(prox[immune == "Basophil"]$ratio)))`-`r round(100 * (1 - min(prox[immune == "Basophil"]$ratio)))`% closer to the nearest ProInf than a layer-preserving shuffle predicts (days `r paste(prox[immune == "Basophil"]$day, collapse = ", ")`) | **Reproduced** at the population level |
+| (not asked by the paper) Does the activated population keep an internal lineage order? | Within ProInf in the papillary compartment the papillary marker *Apcdd1* sits on the superficial side at days 6, 9 and 12 (z = `r paste(fmt(dpn[gene == "Apcdd1" & layer == "PAP" & day >= 6][order(day)]$z, 1), collapse = ", ")`; same sign each time, the day-12 unit not individually significant) and the reticular markers *Pi16* / *Dpp4* on the deep side; the receptor and chemokine program (*Il4ra*, *Osmr*, *Il6st*, *Cxcl1*) is induced without being repositioned | **New observation** (one section per time point; exploratory) |
+
+What this shows about the method: a tissue it was not developed on, with its own layer definition, yields the atlas's fibroblast biology from position
+alone, orders the two candidate sources, adds a depth-resolved location, separates the two disease models where the paper's transcriptional view
+merges them, and carries a calibrated gene-level test (Section 9) into a dataset with no replicate sections and no blank barcodes.
+
+## 2. Data and coordinates
+
+**Dataset.** 16 full-thickness skin strips (MERFISH, 500-gene panel, ~404,000 cells): WT ear, neck and flank plus a day-0 neck (4 normal); MC903
+dermatitis at days 3, 6 and 12 (neck) and day 9 (ear, neck, flank); oxazolone at days 10 and 16 (ear, neck, flank). One section per condition and
+site, three instrument runs; no mouse identifiers. Cell labels are the authors' (`celltype_subtype`, 42 types, including FIB_Papillary, FIB_Reticular,
+FIB_Subcutis, FIB_Subfascia and FIB_ProInf).
+
+**Layers (tissue-specific input, geometric).** Depth is the distance to the connected keratinocyte sheet (keratinocytes within 40 um linked; only
+components of >= 300 cells count, which drops follicle bulbs). EPI: depth <= 10 um. PAP: upper 40% of the dermis. RET: lower 60%, to the onset of
+dermal fat (10th percentile of adipocyte depth). SUB: fat to the panniculus carnosus (median muscle depth). SUBFAS: below it. Fat and muscle are landmarks,
+not populations under test; no fibroblast label enters the layer definition.
+
+**Within-layer coordinate.** Plain MorphoGAM per strip and compartment (one curve fit, open band), r = 0 at the surface side and r = 1 at the deep
+side of each compartment, orientation set by the depth landmark. Fits: `r length(unique(paste(x$strip, x$layer)))` strip x compartment units.
+
+**Engine.** The colon three-step score unchanged: Jensen-Shannon distance between the KDEs of r within each layer, cell-count-weighted combination
+across layers, layer-overlap penalty; >= 30 cells per population per layer on both sides. Fibroblasts are compared in PAP, RET, SUB and SUBFAS;
+keratinocytes in EPI. No expression enters the matching.
+
+### 2.1 Coordinate check: known-location genes order by depth
+
+Krt1 (suprabasal keratinocytes), Pdgfra (dermal fibroblasts), Adipoq (adipocytes) and Des (panniculus muscle) must order Krt1 < Pdgfra < Adipoq, Des
+on the depth coordinate. This checks the coordinate, not the method. The full order holds in `r sum(anat_ok$ordered)` of `r nrow(anat_ok)` strips with
+>= 50 transcripts per gene; the exceptions are strips with a large subcutis or fascia, where Pdgfra+ fibroblasts below the fat pull the Pdgfra mean past the
+fat onset (Pdgfra marks fibroblasts at every depth, so that step of the ordering is the weak one). The landmark order Krt1 < Adipoq, Des holds in every strip.
+
+```{r anat_fig, fig.width = 11, fig.height = 4}
+ggplot(anat, aes(strip, wdepth, colour = gene)) + geom_pointrange(aes(ymin = q25, ymax = q75), position = position_dodge(width = .6), size = .3) +
+  scale_colour_manual(values = c(Krt1 = "#d62728", Pdgfra = "#1f77b4", Adipoq = "#f0c800", Des = "#984ea3")) + theme_bw(9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + labs(x = NULL, y = "transcript-weighted depth (um); bar = 25-75% of transcripts", title = "Known-location genes on the depth coordinate")
+```
+
+## 3. Noise floor: how well does a population find itself across two healthy sections?
+
+```{r floor_fig, fig.width = 10, fig.height = 4.2}
+L0 <- rbind(longify(M0, "WT_Neck vs d0_WT_neck (different mouse and run)"), longify(Ms, "WT_Neck vs WT_Flank (different site)"))
+heat(L0, "Normal vs normal fibroblasts: a stable population should rank itself first", ncol = 2)
+kable(floor, caption = "Self-match rate and mean self-similarity between healthy strips. This is the technical plus biological floor for every rank below.")
+```
+
+The floor is weaker than in colon (where most Day 0 populations rank their Day 9 counterpart first): the two normal neck strips come from different
+mice and runs, and the deep compartments differ in how much subcutis and fascia the section captured. Self-similarity of the superficial subtypes
+(papillary `r fmt(M0["FIB_Papillary", "FIB_Papillary"], 2)`, reticular `r fmt(M0["FIB_Reticular", "FIB_Reticular"], 2)`) sets what "same position"
+scores across sections; ranks in Sections 4 and 5 are read against it.
+
+## 4. Result 1: the pro-inflammatory fibroblast occupies the papillary position first, then the reticular one
+
+```{r maps, fig.width = 14, fig.height = 11}
+w <- x[strip %in% c("d0_WT_neck", MC), .SD[abs(u - median(u)) < 1500], by = strip]
+w[, lab := factor(paste0("day ", DAY[strip], "  (", strip, ")"), levels = paste0("day ", DAY[c("d0_WT_neck", MC)], "  (", c("d0_WT_neck", MC), ")"))]
+pm <- ggplot(w, aes(u, v)) + geom_point(aes(colour = layer), size = .2) + scale_colour_manual(values = PAL_L, name = "compartment", guide = guide_legend(override.aes = list(size = 3), order = 1)) +
+  geom_point(data = w[Tier2 %in% FIB5][order(Tier2 == "FIB_ProInf")], aes(fill = Tier2), shape = 21, size = 1.4, stroke = .15, colour = "grey25") +
+  scale_fill_manual(values = PAL_F, labels = pretty, name = "fibroblast", guide = guide_legend(override.aes = list(size = 3), order = 2)) +
+  facet_wrap(~ lab, ncol = 1) + coord_equal(expand = FALSE) + theme_bw(9) + theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) +
+  ggtitle("Central 3 mm of each neck strip, epidermis on top: depth compartments (background) and the five fibroblast populations")
+ggsave(file.path(FIG, "F1_maps.png"), pm, width = 14, height = 11, dpi = 110, bg = "white"); pm
+```
+
+```{r abundance, fig.width = 12, fig.height = 3.8}
+a1 <- ggplot(abund, aes(day, per_mm, colour = Tier2)) + geom_line() + geom_point(size = 2) + scale_colour_manual(values = PAL_F, labels = pretty, name = NULL) + theme_bw(9) +
+  labs(x = "MC903 day (one run: d0_WT_neck, day 3, 6, 12; day 9 from the other run)", y = "cells per mm of strip", title = "Abundance: what the paper's argument rests on")
+occ <- sl[Tier2 %in% c("FIB_Papillary", "FIB_ProInf", "FIB_Reticular") & layer %in% DERM & strip %in% c("d0_WT_neck", MC), .N, by = .(strip, Tier2, layer)][, p := N / sum(N), by = .(strip, Tier2)][, day := DAY[strip]]
+a2 <- ggplot(occ, aes(factor(day), p, fill = factor(layer, levels = DERM))) + geom_col(width = .8) + facet_wrap(~ pretty(Tier2)) + scale_fill_manual(values = PAL_L, name = "compartment") +
+  theme_bw(9) + labs(x = "MC903 day", y = "share of the population", title = "Compartment occupancy (whole strip; papillary cells after day 0 are few)")
+ggsave(file.path(FIG, "F2_abundance.png"), a1 + a2 + plot_layout(widths = c(1, 1.5)), width = 12, height = 3.8, dpi = 110, bg = "white"); a1 + a2 + plot_layout(widths = c(1, 1.5))
+```
+
+The paper's sequence (papillary decline early, reticular later, ProInf expansion) is an abundance statement. The question for the framework is whether
+the emerging population occupies the positions those subtypes held, which abundance cannot answer.
+
+```{r heat_mc, fig.width = 14, fig.height = 7.5}
+L <- rbindlist(lapply(names(MATS), function(k) { s <- strsplit(k, " ")[[1]]; longify(MATS[[k]], paste0(s[1], "  ->  day ", DAY[s[2]])) }))
+L[, tag := factor(tag, levels = unique(tag))]
+ph <- heat(L, "Fibroblasts: each normal strip (rows) against each MC903 neck time point (columns), dermal compartments", ncol = 4)
+ggsave(file.path(FIG, "F3_heatmaps.png"), ph, width = 14, height = 7.5, dpi = 110, bg = "white"); ph
+```
+
+```{r rank_table}
+wide <- dcast(tab[claim != "identity control" | query %in% c("FIB_Subcutis", "FIB_Subfascia")], pair + claim ~ day + normal, value.var = "rank")
+kable(wide, caption = "Rank of the expected match (1 = top) at each MC903 day, for each normal reference. Day 3, 6 and 12 share an instrument run with d0_WT_neck; day 9 shares one with WT_Neck.")
+```
+
+```{r traj, fig.width = 12, fig.height = 4.2}
+t1 <- ggplot(traj, aes(day, S_ProInf, colour = query, linetype = normal, group = interaction(query, normal))) +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = band[1], ymax = band[2], alpha = .12, fill = "grey30") + geom_line() + geom_point(size = 2) +
+  scale_colour_manual(values = PAL_F, labels = pretty, name = "normal fibroblast") + scale_linetype(name = "normal reference") + theme_bw(9) +
+  labs(x = "MC903 day", y = "similarity to pro-inflammatory fibroblasts", title = "S(normal subtype, ProInf) by day", subtitle = sprintf("grey band: self-similarity of subtypes between the two normal strips (%.2f-%.2f)", band[1], band[2]))
+t2 <- ggplot(traj, aes(day, margin, colour = query, linetype = normal, group = interaction(query, normal))) + geom_hline(yintercept = 0, linetype = 2) + geom_line() + geom_point(size = 2) +
+  scale_colour_manual(values = PAL_F, labels = pretty, name = "normal fibroblast") + scale_linetype(name = "normal reference") + theme_bw(9) +
+  labs(x = "MC903 day", y = "S(ProInf) minus S(best other candidate)", title = "Margin of ProInf over the next-best disease candidate", subtitle = "> 0: ProInf is this subtype's top match")
+ggsave(file.path(FIG, "F4_trajectory.png"), t1 + t2 + plot_layout(guides = "collect"), width = 12, height = 4.2, dpi = 110, bg = "white"); t1 + t2 + plot_layout(guides = "collect")
+kable(dcast(traj[query %in% c("FIB_Papillary", "FIB_Reticular"), .(pair = paste(pretty(query), "-> ProInf"), day, normal, S = round(S_ProInf, 3))], pair + normal ~ day, value.var = "S"),
+      caption = "Similarity of the two superficial normal subtypes to ProInf, by day and normal reference.")
+```
+
+**Reading.** At day 3 ProInf is still rare (`r abund[strip == "d3_MC903_neck" & Tier2 == "FIB_ProInf"]$cells` cells) and neither superficial subtype
+resembles it. From day 6, papillary fibroblasts rank ProInf first with both normal references at days 6 and 12 and first or second at day 9, and the
+margin over the next candidate widens with time. Reticular fibroblasts also reach rank 1 at day 6 and sit at rank 1-3 afterwards, but their similarity
+is lower than the papillary one at every time point from day 6. The position-based reading is therefore the paper's sequence: the activated population
+occupies the papillary niche first and most clearly, and the reticular niche as well, with the papillary resemblance leading. The paper inferred this from
+proportions; here it comes from where the cells sit, with no expression and no registration between strips that differ in length, site and run.
+
+### 4.1 Is the resemblance within-layer position or only layer occupancy?
+
+```{r depth_fig, fig.width = 13, fig.height = 4.2}
+ref <- x[strip == "d0_WT_neck" & Tier2 %in% c("FIB_Papillary", "FIB_Reticular") & layer %in% c("PAP", "RET"), .(layer, pop = Tier2, value)]
+pin <- x[strip %in% MC[-1] & Tier2 == "FIB_ProInf" & layer %in% c("PAP", "RET"), .(layer, pop = "FIB_ProInf", value, day)]
+panels <- rbindlist(lapply(unique(pin$day), function(dy) rbind(ref[, .(layer, pop, value, day = dy)], pin[day == dy, .(layer, pop, value, day)])))
+panels[, dayf := factor(paste("day", day), levels = paste("day", sort(unique(day))))]
+pd <- ggplot(panels, aes(value, colour = pop)) + geom_density(adjust = 1.3, linewidth = .8) + facet_grid(layer ~ dayf, labeller = labeller(layer = c(PAP = "PAP compartment", RET = "RET compartment"))) +
+  scale_colour_manual(values = PAL_F, labels = pretty, name = NULL) + theme_bw(9) + labs(x = "MorphoGAM r within the compartment (0 surface side, 1 deep side)", y = "density", title = "ProInf (black) against the normal papillary and reticular positions (d0_WT_neck), within each compartment")
+ggsave(file.path(FIG, "F5_within_layer.png"), pd, width = 13, height = 4.2, dpi = 110, bg = "white"); pd
+kable(dcast(split_tab, from + to ~ day, value.var = "sim", fun.aggregate = function(v) round(mean(v), 3)),
+      caption = "ProInf split by the compartment it sits in: similarity of normal papillary / reticular fibroblasts to the superficial (PAP) and deeper (RET) halves of the population, PAP + RET only, mean over the two normal references.")
+```
+
+Within both compartments ProInf lies deeper than the resident population (mean r in PAP: normal reticular `r mv[layer == "PAP"]$mean_r_normal_reticular`,
+day-9 ProInf `r mv[layer == "PAP"]$mean_r_disease_ProInf`; in RET: `r mv[layer == "RET"]$mean_r_normal_reticular` vs `r mv[layer == "RET"]$mean_r_disease_ProInf`).
+The split table shows that the superficial half of ProInf is closer to normal papillary fibroblasts and the deeper half to normal reticular fibroblasts, so the
+resemblance is positional, not only a matter of which compartment the cells fall in. This is the depth-resolved version of the paper's "reticular dermis":
+the activated population forms a band across the papillary/reticular boundary, deeper than the papillary cells it replaces.
+
+### 4.2 Within-run series: how inflammation remodels the fibroblast compartment (d0_WT_neck, day 3, 6, 12; one MERSCOPE run)
+
+The four strips below share one instrument run, so differences between them are not batch effects. Day 9 (other run) is in the main panels above.
+Four descriptive readouts that the paper does not give: where each population is enriched, how dispersed it is across compartments, how
+segregated the resident subtypes are from one another, and how broad the ProInf band is within a compartment.
+
+```{r run_series, fig.width = 13, fig.height = 4.6}
+RUN <- c("d0_WT_neck", "d3_MC903_neck", "d6_MC903_neck", "d12_MC903_neck")
+# A1: layer occupancy and enrichment relative to all fibroblasts in the strip
+occ2 <- x[strip %in% RUN & layer %in% DERM & Tier2 %in% FIB5, .N, by = .(strip, Tier2, layer)]
+tot2 <- x[strip %in% RUN & layer %in% DERM & Tier2 %in% FIB, .N, by = .(strip, layer)][, p_all := N / sum(N), by = strip]
+occ2[, p := N / sum(N), by = .(strip, Tier2)][, n_pop := sum(N), by = .(strip, Tier2)]
+occ2 <- merge(occ2, tot2[, .(strip, layer, p_all)], by = c("strip", "layer"))[n_pop >= 30][, enrich := p / p_all]
+occ2[, dayf := factor(paste("day", DAY[strip]), levels = paste("day", DAY[RUN]))][, layer := factor(layer, levels = DERM)][, pop := factor(pretty(Tier2), levels = pretty(FIB5))]
+pa1 <- ggplot(occ2, aes(layer, pop, fill = log2(enrich))) + geom_tile(colour = "white") + geom_text(aes(label = sprintf("%d%%", round(100 * p))), size = 2.8) + facet_wrap(~ dayf, nrow = 1) +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b", limits = c(-3, 3), oob = scales::squish, name = "log2 enrichment\nvs all fibroblasts") + scale_y_discrete(limits = rev) + theme_bw(9) +
+  labs(x = "compartment", y = NULL, title = "Compartment occupancy (label = % of the population) and enrichment relative to all fibroblasts of the strip; populations with >= 30 cells")
+ggsave(file.path(FIG, "F10_occupancy_enrichment.png"), pa1, width = 13, height = 4.6, dpi = 110, bg = "white"); pa1
+```
+
+```{r run_series2, fig.width = 13, fig.height = 4.2}
+# D1: within-strip spatial similarity among fibroblast populations (how segregated are they from one another?)
+MW <- lapply(RUN, function(t) sim(x, t, t, FIB5, DERM)); names(MW) <- RUN
+LW <- rbindlist(lapply(RUN, function(t) longify(MW[[t]], paste0("day ", DAY[t]))))[from != to]
+LW[, tag := factor(tag, levels = paste("day", DAY[RUN]))][, from := factor(pretty(from), levels = pretty(FIB5))][, to := factor(pretty(to), levels = pretty(FIB5))]
+pd1 <- ggplot(LW, aes(to, from, fill = sim)) + geom_tile(colour = "white") + geom_text(aes(label = ifelse(is.na(sim), "", sprintf("%.2f", sim))), size = 2.8) + facet_wrap(~ tag, nrow = 1) +
+  scale_fill_gradient(low = "white", high = "firebrick", limits = c(0, 1), na.value = "grey92", name = "similarity") + scale_y_discrete(limits = rev) + theme_bw(9) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, title = "Spatial similarity between fibroblast populations within the same strip (dermal compartments); low = segregated, high = intermixed")
+ggsave(file.path(FIG, "F11_within_strip_segregation.png"), pd1, width = 13, height = 4.2, dpi = 110, bg = "white"); pd1
+RES <- c("Papillary", "Reticular", "Subcutis", "Subfascia")
+seg <- LW[from %in% RES & to %in% RES & is.finite(sim), .(mean_similarity_among_residents = round(mean(sim), 3), pairs = .N), by = tag]
+ent <- occ2[, .(entropy_nats = round(-sum(p * log(p)), 2), cells = n_pop[1]), by = .(dayf, pop)]
+kable(seg, caption = "Mean pairwise similarity among the resident subtypes present in the strip (papillary, reticular, subcutis, subfascia). Higher = the resident subtypes occupy more similar positions, i.e. less compartmentalised.")
+kable(dcast(ent, pop ~ dayf, value.var = "entropy_nats"), caption = "Entropy of compartment occupancy per population (natural log; 0 = one compartment, 1.39 = even over four). Descriptive; ignores position within a compartment.")
+# C2: width of the ProInf band within PAP and RET, against the resident references at day 0
+spread <- rbind(x[strip == "d0_WT_neck" & Tier2 %in% c("FIB_Papillary", "FIB_Reticular") & layer %in% c("PAP", "RET"), .(cells = .N, median_r = round(median(r), 3), IQR_r = round(IQR(r), 3)), by = .(strip, population = pretty(Tier2), layer)],
+                x[strip %in% RUN & Tier2 == "FIB_ProInf" & layer %in% c("PAP", "RET"), .(cells = .N, median_r = round(median(r), 3), IQR_r = round(IQR(r), 3)), by = .(strip, layer)][, population := "ProInf"], use.names = TRUE)[cells >= 30]
+spread[, day := DAY[strip]]
+kable(spread[order(layer, population, day), .(layer, population, day, strip, cells, median_r, IQR_r)], caption = "Within-compartment position of ProInf by day against the day-0 resident references: median r and interquartile range (band width). A larger IQR than the residents means the activated population is spread over more of the compartment, not just shifted.")
+```
+
+```{r run_series3, fig.width = 9, fig.height = 3.6}
+# E2: where the basophil-ProInf proximity is, by the compartment the basophil sits in (same layer-preserving null as Section 8)
+prox2 <- rbindlist(lapply(RUN[-1], function(t) { d <- x[strip == t & layer %in% DERM]; f <- d[Tier2 %in% FIB]; bs <- d[Tier2 == "Basophil"]
+  if (nrow(bs) < 30 || sum(f$Tier2 == "FIB_ProInf") < 30) return(NULL)
+  md <- function(lab) { nn <- get.knnx(as.matrix(f[lab == "FIB_ProInf", .(x, y)]), as.matrix(bs[, .(x, y)]), k = 1)$nn.dist[, 1]; tapply(nn, bs$layer, median) }
+  obs <- md(f$Tier2); nm <- names(obs); obs <- as.numeric(obs)
+  nul <- replicate(N_SHUF, { g <- copy(f); g[, Tier2 := sample(Tier2), by = layer]; as.numeric(md(g$Tier2)) }); nul <- matrix(nul, nrow = length(obs))
+  data.table(strip = t, day = unname(DAY[t]), compartment = nm, basophils = as.integer(table(bs$layer)[nm]), obs_um = round(obs), null_um = round(rowMeans(nul)), ratio = round(obs / rowMeans(nul), 2), p = round(rowMeans(nul <= obs), 3)) }))
+prox2 <- prox2[basophils >= 20]
+pe2 <- ggplot(prox2, aes(factor(day), ratio, colour = factor(compartment, levels = DERM), group = compartment)) + geom_hline(yintercept = 1, linetype = 2) + geom_line() + geom_point(aes(size = basophils)) +
+  scale_colour_manual(values = c(PAP = "#ff7f0e", RET = "#1f77b4", SUB = "#e3c800", SUBFAS = "#984ea3"), name = "basophil's compartment") + theme_bw(9) +
+  labs(x = "MC903 day", y = "observed / expected distance to nearest ProInf", title = "Where the basophil-ProInf proximity is: ratio by the compartment the basophil sits in (< 1 = closer than the layer-preserving null)")
+ggsave(file.path(FIG, "F12_niche_by_compartment.png"), pe2, width = 9, height = 3.6, dpi = 110, bg = "white"); pe2
+kable(prox2[order(day, compartment)], caption = sprintf("Basophil-to-nearest-ProInf distance by the basophil's compartment, against %d label shuffles within compartment; compartments with >= 20 basophils.", N_SHUF))
+```
+
+**Reading.** The enrichment map (F10) shows the papillary compartment losing its resident population and gaining ProInf, with ProInf enriched in PAP
+relative to all fibroblasts at every time point from day 6, while subcutis and subfascia fibroblasts stay enriched in their own compartments. The
+within-strip similarity matrices (F11) ask a question the paper does not: whether the resident subtypes remain spatially segregated from one another
+under inflammation. The mean over resident pairs is not computed over the same pairs at every day (papillary fibroblasts drop below 30 cells after day 0), so compare pairs that exist throughout: reticular-subcutis falls from 0.23 at day 0 to 0.02-0.05 at days 3-6 and returns to 0.11 at day 12, and subcutis-subfascia from 0.33 to 0.19 and back to 0.29. The resident subtypes become more sharply segregated while ProInf expands and partly re-mix by day 12; one section per day, so descriptive. The IQR table gives the width of the
+ProInf band inside each compartment against the day-0 residents. F12 locates the basophil-ProInf proximity by compartment.
+
+## 5. Result 2: deep fibroblasts keep their identity and never match ProInf
+
+```{r ident}
+kable(dcast(tab[query %in% c("FIB_Subcutis", "FIB_Subfascia")], pair + claim ~ day + normal, value.var = "rank"),
+      caption = "Subcutis and subfascial fibroblasts: rank of ProInf (should be low) and of their own label (should be 1) among the disease candidates.")
+```
+
+ProInf ranks `r min(deep$rank)` to `r max(deep$rank)` for the two deep subtypes in every comparison, while they rank their own label first in
+`r round(100 * mean(ident$rank == 1))`% of comparisons (`r sum(ident$rank == 1)` of `r nrow(ident)`), against a normal-vs-normal floor of
+`r floor$self_rank1_pct[1]`%. The paper's negative claim (subcutis and fascia are not a source) is reproduced, and the specificity of the score is
+shown on the same strips as its sensitivity: it does not call every disease population similar to everything.
+
+## 6. Result 3: keratinocytes within the epidermis
+
+```{r kc}
+kable(kct, caption = "Closest disease keratinocyte state to the normal interfollicular keratinocyte, by position within the 10 um epidermal sheet.")
+```
+
+In `r kc_stress$stressed` of `r kc_stress$n` comparisons the closest disease state is a stressed keratinocyte state (basal or cycling), the transition
+the paper describes. The sheet is two to three cells deep, so r carries little information here and this is the weakest of the positional readouts.
+
+## 7. Result 4: oxazolone and the flank, where position and transcription disagree
+
+```{r oxa, fig.width = 14, fig.height = 4.2}
+LO <- rbindlist(lapply(names(MO), function(k) longify(MO[[k]], sub(" ", "  ->  ", k)))); LO[, tag := factor(tag, levels = unique(tag))]
+po <- heat(LO, "Fibroblasts: normal neck -> oxazolone neck", ncol = 4)
+ggsave(file.path(FIG, "F6_oxa.png"), po, width = 14, height = 4.2, dpi = 110, bg = "white"); po
+kable(dcast(tabo[claim != "identity control" | query %in% c("FIB_Subcutis", "FIB_Subfascia")], pair + claim ~ disease + normal, value.var = "rank"), caption = "Ranks of the expected matches on the oxazolone neck strips and on the flank.")
+kable(dcast(share, strip ~ factor(layer, levels = DERM), value.var = "pct", fill = 0)[order(match(strip, c(MC, OXA)))], caption = "% of pro-inflammatory fibroblasts per depth compartment, by strip.")
+```
+
+The paper states that the two models converge on the same pro-inflammatory fibroblast state; that claim is transcriptional. Positionally they do not
+converge. On the oxazolone neck, ProInf is not the top match of papillary fibroblasts (ranks `r paste(sort(unique(tabo[grepl("OXA_Neck", disease) & pair == "Papillary -> ProInf"]$rank)), collapse = "/")`),
+and the population sits mostly in the subcutis at day 10 and below the panniculus at day 16, whereas in MC903 it never leaves the dermis. On the
+flank, the MC903 strip reproduces the neck result (papillary -> ProInf rank `r tabo[disease == "d9_MC903_Flank" & pair == "Papillary -> ProInf"]$rank`)
+and only the day-16 oxazolone strip gives ProInf as the top match of a superficial subtype (reticular, rank `r tabo[disease == "d16_OXA_Flank" & pair == "Reticular -> ProInf"]$rank`).
+This is reported as a discrepancy with the paper, not resolved: a transcriptionally shared state occupying different niches in the two models is
+exactly the kind of statement that only a positional comparison can make.
+
+## 8. Result 5: the basophil-fibroblast axis read from position
+
+```{r immune, fig.width = 13, fig.height = 4.5}
+LI2 <- copy(LI)[, from := factor(from, levels = IMM)][, to := factor(pretty(to), levels = pretty(FIB))][, tag := factor(tag, levels = c(MC, OXA))]
+pi <- ggplot(LI2, aes(to, from, fill = sim)) + geom_tile(colour = "white") + geom_text(aes(label = ifelse(is.na(rank), "", rank)), size = 2.8) + facet_wrap(~ tag, ncol = 6) +
+  scale_fill_gradient(low = "white", high = "darkgreen", na.value = "grey92", limits = c(0, 1), name = "similarity") + scale_y_discrete(limits = rev) + theme_bw(9) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + labs(x = "fibroblast population, same strip", y = "immune population", title = "Immune cells against fibroblasts within the same disease strip (dermal compartments); number = rank of the column within the row")
+ggsave(file.path(FIG, "F7_immune.png"), pi, width = 13, height = 4.5, dpi = 110, bg = "white"); pi
+kable(dcast(imm_tab, immune ~ factor(strip, levels = c(MC, OXA)), value.var = "rank_ProInf"), caption = "Rank of ProInf among the fibroblast matches of each immune population (1 = ProInf is where that immune cell sits). Blank = fewer than 30 cells per compartment.")
+```
+
+```{r prox_fig, fig.width = 10, fig.height = 3.8}
+pp <- ggplot(prox, aes(day, ratio, colour = immune)) + geom_hline(yintercept = 1, linetype = 2) + geom_line() + geom_point(aes(size = n)) + theme_bw(9) +
+  labs(x = "MC903 day", y = "observed / expected distance to nearest ProInf", title = "Physical proximity of immune cells to ProInf, against a layer-preserving shuffle of fibroblast labels", subtitle = "< 1: closer than the compartment occupancy of ProInf alone predicts")
+ggsave(file.path(FIG, "F8_proximity.png"), pp, width = 10, height = 3.8, dpi = 110, bg = "white"); pp
+kable(prox[order(day, immune)], caption = sprintf("Median nearest-ProInf distance (um) per immune population; null = fibroblast subtype labels shuffled within compartment (%d shuffles); p = share of shuffles at least as close.", N_SHUF))
+```
+
+Two independent readings agree with the paper's axis. By position, ProInf is the fibroblast population whose depth distribution basophils share
+(rank `r paste(imm_tab[immune == "Basophil"]$rank_ProInf, collapse = ", ")` at days `r paste(DAY[imm_tab[immune == "Basophil"]$strip], collapse = ", ")`).
+By physical distance, basophils lie `r paste0(round(100 * (1 - prox[immune == "Basophil"][order(day)]$ratio)), "%", collapse = ", ")` closer to the nearest ProInf (days `r paste(prox[immune == "Basophil"][order(day)]$day, collapse = ", ")`)
+than a null that keeps compartment occupancy fixed, so the co-localisation is not explained by both populations being in the
+dermis. Macrophages and mast cells show no such excess at day 12. The paper's neighbourhood analysis cannot make this distinction because the
+neighbourhood labels are themselves composition-derived.
+
+## 9. The gene-level test on skin: the population-relative displacement delta
+
+The statistic is the colon pipeline's delta, unchanged: for one gene, one population, one compartment, one strip, the transcript-weighted mean r minus
+the mean r of all cells of that population, with its exact standard error and the frozen eligibility rule (>= 30 cells, SE < 0.05). Positive = transcripts
+deeper than the cells that carry them. Two things differ from colon and are handled explicitly: there is one section per time point, so the REML +
+Knapp-Hartung pooling across sections is not available and every call is a per-section estimate with a per-pair contrast; and the panel has no blank
+barcodes, so the cell-size gradient that the blanks absorbed in colon is removed here by library-size normalisation (checked in 9.3).
+
+### 9.1 Inside the pro-inflammatory population
+
+```{r delta_fig, fig.width = 13, fig.height = 4.6}
+show <- dpn[gene %in% c("Apcdd1", "Pi16", "Dpp4", "Cxcl12", "Tnc", "Il4ra", "Osmr", "Il6st", "Cxcl1")]
+show[, set := fifelse(gene %in% GI, "lineage markers", fifelse(gene %in% c("Cxcl12", "Tnc"), "program genes with a position", "program genes without one"))]
+show[, gene := factor(gene, levels = c("Apcdd1", "Pi16", "Dpp4", "Cxcl12", "Tnc", "Il4ra", "Osmr", "Il6st", "Cxcl1"))]
+pg <- ggplot(show, aes(day, delta, colour = gene, shape = layer)) + geom_hline(yintercept = 0, linetype = 2) +
+  geom_pointrange(aes(ymin = delta - 1.96 * se, ymax = delta + 1.96 * se), position = position_dodge(width = 1.6), size = .3) + facet_wrap(~ set) + theme_bw(9) +
+  labs(x = "MC903 day", y = "delta within ProInf (r units) +/- 1.96 SE", title = "Within pro-inflammatory fibroblasts: where do the transcripts sit relative to the cells? (negative = superficial side)")
+ggsave(file.path(FIG, "F9_delta_proinf.png"), pg, width = 13, height = 4.6, dpi = 110, bg = "white"); pg
+kable(dpn[gene %in% c("Apcdd1", "Pi16", "Dpp4", "Cxcl12", "Tnc")][order(gene, layer, day), .(gene, strip, layer, cells, frac_expressing = round(frac_pos, 2), delta = round(delta, 3), se = round(se, 3), z = round(z, 1))],
+      caption = "Eligible units for the lineage markers and the two positioned program genes within ProInf (MC903 neck).")
+```
+
+* **Lineage order inside the activated population.** The papillary-lineage marker *Apcdd1* sits on the superficial side of ProInf in the papillary
+  compartment at days 6, 9 and 12 (z = `r paste(fmt(dpn[gene == "Apcdd1" & layer == "PAP" & day >= 6][order(day)]$z, 1), collapse = ", ")`; same sign each time, the day-12 unit on its own not significant), while the
+  reticular markers *Pi16* (day 9 PAP, z = `r fmt(dpn[gene == "Pi16" & layer == "PAP" & day == 9]$z, 1)`) and *Dpp4* (day 6 RET, z = `r fmt(dpn[gene == "Dpp4" & layer == "RET" & day == 6]$z, 1)`)
+  sit on the deep side. The two lineages' transcripts are stacked within one label, consistent with papillary and reticular fibroblasts being activated in
+  place rather than one subtype migrating. The paper assigns lineage by subclustering and does not look inside the activated population.
+* **Program genes.** *Cxcl12* transcripts sit deep within ProInf in the papillary compartment at all three time points (z = `r paste(fmt(dpn[gene == "Cxcl12" & layer == "PAP" & day >= 6][order(day)]$z, 1), collapse = ", ")`);
+  *Tnc*, the defining marker, is uniform within the dermal compartments but sits on the dermal-facing side of the ProInf cells that reach the subcutis
+  (z = `r paste(fmt(dpn[gene == "Tnc" & layer == "SUB"][order(day)]$z, 1), collapse = ", ")`). The receptors and chemokines the paper uses to define the
+  state (*Il4ra*, *Osmr*, *Il6st*, *Cxcl1*) have delta at zero in nearly every unit: the program is induced without being repositioned, which is the
+  calibrated null the positioned genes are read against.
+
+### 9.2 Lineage contrasts, per pair
+
+```{r contrasts}
+kable(ct_summ[pairs >= 6], caption = "Shift = delta(ProInf, disease) - delta(parent, normal), one pair per normal strip x disease strip x compartment where both arms are eligible: number of pairs, mean shift, sign consistency across pairs, pairs with BH q < 0.05 within the contrast, smallest q.")
+```
+
+With one section per time point the cross-section pooling that gives the colon calls their calibration is not available, so these contrasts are reported
+as per-pair consistency rather than as calls. The one pattern that replicates across nearly all pairs is the collagens: *Col1a1* and *Col3a1* are
+superficial-side in the normal parent populations and deep-side in ProInf (sign consistency `r ct_summ[gene == "Col3a1" & grepl("reticular", contrast)]$consistency_pct`% and
+`r ct_summ[gene == "Col1a1" & grepl("reticular", contrast)]$consistency_pct`% over `r ct_summ[gene == "Col3a1" & grepl("reticular", contrast)]$pairs` reticular pairs),
+a reversed pattern in the colon vocabulary. It is shown so that it is on record; it would need replicate sections to be called.
+
+### 9.3 Is delta calibrated on this geometry?
+
+```{r nulls}
+kable(perm, caption = sprintf("Exact SE versus permutation SD (%d shuffles of the counts among the unit's ProInf cells); a ratio near 1 means the SE is right on this geometry.", N_PERM))
+kable(simb_s, caption = sprintf("Known gradients simulated on the real ProInf positions (Poisson(lambda e^(beta r)), %d replicates per unit): mean recovered delta, rejection rate at |z| > 1.96 (should be 0.05 at beta = 0), and sign recovery.", N_SIM))
+kable(mv, caption = "Population moved, gene did not: counts with no gradient on normal reticular positions and on disease ProInf positions. The populations sit at different r, yet the false-positive rate of delta stays nominal in both, because delta is relative to the population's own cells.")
+kable(sz, caption = "Cell-size gradient with no gene gradient, on normal papillary fibroblasts (where the total-count gradient is strongest): raw-count delta rejects far above 5%; the library-size-normalised delta used here does not.")
+```
+
+The four checks transfer the simulation evidence of the colon section to this tissue: the exact SE matches the permutation SD (ratios
+`r fmt(min(perm$ratio), 2)`-`r fmt(max(perm$ratio), 2)`), a null gradient is rejected `r round(100 * simb_s[beta == 0]$reject_rate)`% of the time and a real
+one is recovered with the correct sign, a population that moves without an internal gradient gives `r round(100 * max(mv$reject_normal, mv$reject_disease))`%
+false positives at most (`r N_SIM` replicates), and the size-gradient artefact that raw counts would inherit (`r round(100 * max(sz$reject_raw))`% rejection) is removed by
+normalisation (`r round(100 * max(sz$reject_normalised))`%).
+
+### 9.4 Do the positioned genes replicate on other sites and in oxazolone?
+
+```{r general}
+kable(dg[order(gene, strip, layer), .(gene, strip, layer, cells, frac_expressing = round(frac_pos, 2), delta = round(delta, 3), se = round(se, 3), z = round(z, 1))],
+      caption = "Eligible ProInf units on the MC903 flank and in oxazolone (neck and flank).")
+```
+
+These are the only replication available. *Cxcl12* keeps its deep-side sign in the MC903 flank papillary compartment; *Tnc* keeps its dermal-facing
+sign in most subcutis units but not all (one oxazolone unit has the opposite sign), so the Tnc gradient should be read as an MC903 observation.
+
+## 10. Robustness to the layer definition
+
+```{r AB}
+AB2 <- AB[pair %in% c("Papillary -> ProInf", "Reticular -> ProInf", "Subcutis -> ProInf", "Subfascia -> ProInf", "Subcutis -> Subcutis", "Subfascia -> Subfascia")]
+kable(dcast(AB2, pair + claim ~ day + normal, value.var = c("rank_A", "rank_B")), caption = "Rank of the expected match under A (depth compartments, the method) and B (the authors' neighbourhood clusters collapsed to EPI / DER / SUB, MorphoGAM re-fitted per B layer).")
+kable(AB[pair %in% c("Papillary -> ProInf", "Reticular -> ProInf"), .(S_A = round(mean(sim_A), 3), S_B = round(mean(sim_B), 3)), by = .(pair, day)][order(pair, day)],
+      caption = "Similarity to ProInf under the two layer systems, mean over the two normal references.")
+```
+
+Under the authors' own neighbourhood labels collapsed to three layers (the like-for-like with the colon's MU/SM/ME), the coarse answer is the same:
+from day 6 ProInf is the top match of the superficial subtypes and never of the deep ones. What the collapse loses is the ordering: it puts two thirds
+of papillary fibroblasts into "epidermis", so papillary and reticular can no longer be told apart by position (`r fmt(mean(AB[pair == "Papillary -> ProInf" & day == 12]$sim_B), 2)` vs `r fmt(mean(AB[pair == "Reticular -> ProInf" & day == 12]$sim_B), 2)` at day 12 under B,
+against `r fmt(mean(AB[pair == "Papillary -> ProInf" & day == 12]$sim_A), 2)` vs `r fmt(mean(AB[pair == "Reticular -> ProInf" & day == 12]$sim_A), 2)` under A).
+The geometric layers are the ones that cannot be called circular, since no cell label enters them.
+
+## 11. Limitations
+
+* **One section per condition and site.** The time courses are cross-sectional snapshots; ranks are replicated only across the two normal references
+  and, for day 9 and the flank, across runs. Gene-level results have no cross-section pooling and are exploratory.
+* **The normal-versus-normal floor is weak** (`r floor$self_rank1_pct[1]`% self-match across the two healthy neck strips, `r floor$self_rank1_pct[2]`% across sites),
+  mainly because the deep compartments differ in how much tissue each section captured; rank 1 in skin is scored against a noisier baseline than in colon.
+* **Position is not lineage.** The framework says that ProInf occupies the positions papillary (and, less clearly, reticular) fibroblasts held; it does
+  not identify the cell of origin. The agreement with the paper is between two independent kinds of evidence, not a lineage proof.
+* **Ear strips were excluded** from the fibroblast comparison: cartilage splits the ear into two faces, so depth beyond ~100 um is not comparable.
+
+## 12. Files
+
+* Coordinates: `output/morphogam_auto/` (system A), `output/morphogam_B/` (system B); layer rule in `code/skin_layers.R`, fits by `code/run_plain_morphogam.R`.
+* Engine: `script/common/threestep_engine.R` (unchanged from colon).
+* Figures saved by this document: `code/figs_application/F1_maps.png` ... `F9_delta_proinf.png`.
+* Earlier per-analysis reports this document consolidates: `skin_similarity.Rmd`, `skin_report.Rmd`, `skin_genes.Rmd`, `skin_patterns.Rmd`, `layerA_vs_B.Rmd`.

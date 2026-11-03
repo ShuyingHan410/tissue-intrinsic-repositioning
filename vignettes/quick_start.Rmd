@@ -1,0 +1,99 @@
+---
+title: "Quick start"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Quick start}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(TICR)
+```
+
+The package operates on **tissue-intrinsic coordinates**: every cell carries an anatomical
+layer and a normalized within-layer position `r` in [0, 1] (0 = inner or surface side,
+1 = outer or deep side). Section 1 shows how such coordinates are produced; sections 2 and 3
+run the two analyses of the paper on example data shipped with the package (mouse colon
+MERFISH, Cadinu et al. 2024).
+
+## 1. Tissue-intrinsic coordinates
+
+For one section, `fit_layer_coordinates()` fits a MorphoGAM medial curve through the
+cells of one layer and returns `t` (position along the curve) and `r_for_jsd` (normalized
+depth). It needs the MorphoGAM package (`remotes::install_github("phillipnicol/MorphoGAM")`)
+and a per-cell table with `x`, `y`, a layer label and a population label.
+
+```{r coords, eval = FALSE}
+cells <- read.csv("my_section.csv")   # your own section table (x, y, layer label, population label);
+                                      # the atlas tables are not shipped - see reproducibility/README.md
+mu <- fit_layer_coordinates(cells, "MU", layer_col = "Leiden_neigh")   # mucosa
+head(mu[, c("Cell_ID", "Tier2", "t", "r_for_jsd")])
+```
+
+Orientation is harmonised so that `r` increases from the lumen (or skin surface) outward:
+
+```{r orient, eval = FALSE}
+o <- orient_outward(mu$r_for_jsd, mu$x, mu$y)
+mu$r_for_jsd <- o$r
+```
+
+## 2. Population correspondence
+
+`colon_fibroblast_two_sections.csv` holds the fibroblast-lineage cells of one healthy
+(Day 0) and one colitis (Day 9) section with their layer and position.
+
+```{r corr}
+f <- system.file("extdata", "colon_fibroblast_two_sections.csv", package = "TICR")
+cells <- read.csv(f)
+head(cells)
+S <- population_similarity(cells, groups = c("Day0", "Day9"))
+round(S, 2)
+```
+
+Rows are Day 0 populations, columns Day 9 candidates. For the healthy crypt-top
+fibroblasts (Fibro 2) the atlas-supported inflammation-associated counterpart is IAF 4:
+
+```{r rank}
+rk <- rank_candidates(S, "Fibro 2", target = "IAF 4")
+rk
+attr(rk, "rank")
+```
+
+In this single section pair IAF 4 is within the top three, behind IAF 3 and the same-label
+Fibro 2 population. A single pair is noisy; the paper evaluates all 210 Day 0 × Day 9 pairs
+and averages the matrices with `pool_similarity()` (`pool_similarity(list(S1, S2, ...))`),
+where IAF 4 becomes the highest-scoring non-identical candidate of Fibro 2 (Figure 2A) and is
+within the top three in 81 % of pairs (Figure 3).
+
+## 3. Population-relative gene displacement
+
+`igfbp5_fibro2_iaf4.csv` holds every Fibro 2 cell of the ten Day 0 sections and every IAF 4
+cell of the Day 9 sections, with its mucosal position and its *Igfbp5* count (zeros
+included).
+
+```{r delta}
+f <- system.file("extdata", "igfbp5_fibro2_iaf4.csv", package = "TICR")
+d <- read.csv(f)
+sec <- delta_by_section(d, "Igfbp5", keep = c("condition", "mouse", "population"))
+head(sec)
+```
+
+Each row is one section: `delta` is the transcript-weighted position of *Igfbp5* minus the
+mean position of the host population, `se0` its analytic null standard error, and
+`eligible` the gate (at least 30 cells and `0 < se0 < 0.05`). Sections are pooled per
+condition by REML random-effects meta-analysis with the Knapp–Hartung adjustment and the
+conditions are contrasted with a Welch t test:
+
+```{r test}
+res <- test_displacement(sec, levels = c("Day0", "Day9"))
+res$arms
+res$contrast
+res$pattern
+```
+
+*Igfbp5* sits slightly on the luminal side of Fibro 2 at Day 0 and on the crypt-base side
+of IAF 4 at Day 9: a reversed localization with Δ ≈ +0.06 of the mucosal axis (Figure 5D of
+the paper). In a genome-wide run the p-values are adjusted with Benjamini–Hochberg within each
+correspondence × anatomical-layer family.

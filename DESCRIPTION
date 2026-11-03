@@ -1,0 +1,38 @@
+Package: TICR
+Type: Package
+Title: Tissue-Intrinsic Coordinates for Cell and Gene Repositioning Across Tissue States
+Version: 0.1.0
+Authors@R: c(
+    person("Shuying", "Han", email = "shuying.han@icloud.com", role = c("aut", "cre")),
+    person("Rong", "Ma", role = "aut"))
+Description: Alignment-free comparison of spatial transcriptomics sections across
+    conditions. Cells are represented by an anatomical layer and a normalized
+    within-layer position fitted with MorphoGAM. Two analyses operate on these
+    coordinates: ranking anatomical correspondences between cell populations by the
+    Jensen-Shannon distance of their positional distributions, and testing
+    population-relative gene displacement (the transcript-weighted position of a gene
+    relative to its host population) across conditions with random-effects
+    meta-analysis over sections.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.1)
+Imports:
+    metafor,
+    stats
+Suggests:
+    MorphoGAM,
+    FNN,
+    Matrix,
+    igraph,
+    RSpectra,
+    mgcv,
+    ripserr,
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0)
+Remotes: phillipnicol/MorphoGAM
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+URL: https://github.com/ShuyingHan410/tissue-intrinsic-repositioning
+BugReports: https://github.com/ShuyingHan410/tissue-intrinsic-repositioning/issues
+Config/roxygen2/version: 8.1.1

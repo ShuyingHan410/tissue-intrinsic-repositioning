@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper below."
+title: "Quantifying Cell and Gene Repositioning Across Tissue States Using Tissue-Intrinsic Geometric Coordinates"
+type: software
+authors:
+  - family-names: Han
+    given-names: Shuying
+    affiliation: "Department of Biostatistics, Harvard T.H. Chan School of Public Health"
+  - family-names: Ma
+    given-names: Rong
+    affiliation: "Harvard T.H. Chan School of Public Health; Broad Institute; Dana-Farber Cancer Institute"
+year: 2026
+repository-code: "https://github.com/ShuyingHan410/tissue-intrinsic-repositioning"
+license: MIT
+preferred-citation:
+  type: article
+  title: "Quantifying Cell and Gene Repositioning Across Tissue States Using Tissue-Intrinsic Geometric Coordinates"
+  authors:
+    - family-names: Han
+      given-names: Shuying
+    - family-names: Ma
+      given-names: Rong
+  year: 2026
+  notes: "Submitted to RECOMB 2027"
