@@ -11,11 +11,9 @@
 #   sbatch setup_envs.sh                                   # batch (uses the proxy)
 #   salloc -p test -c 4 --mem 16G -t 0-02:00 ; bash setup_envs.sh   # interactive
 #
-# Builds THREE envs (STalign needs old numpy, so it can't share with moscot/paste2;
-# CAST needs a GPU torch/dgl build):
+# Builds the envs (STalign needs old numpy, so it can't share with moscot/paste2):
 #   otenv       moscot + PASTE2 + scanpy   (CPU)
 #   stalignenv  STalign                    (CPU, numpy 1.23)
-#   castenv     CAST (torch + dgl)         (GPU)
 set -e
 export http_proxy=http://rcproxy.rc.fas.harvard.edu:3128
 export https_proxy=$http_proxy
@@ -34,11 +32,10 @@ conda config --remove channels defaults        2>/dev/null || true
 conda config --add channels conda-forge        2>/dev/null || true
 conda config --set channel_priority flexible   2>/dev/null || true
 
-# The compute-node proxy 403s github.com, and PASTE2/CAST/STalign are all github-only
+# The compute-node proxy 403s github.com, and the comparator packages are github-only
 # (not on PyPI). CLONE THEM ON THE LOGIN NODE FIRST (login nodes have internet):
 #   unset http_proxy https_proxy; mkdir -p ~/repos
 #   git clone https://github.com/raphael-group/paste2.git  ~/repos/paste2
-#   git clone https://github.com/wanglab-broad/CAST.git    ~/repos/CAST
 #   git clone https://github.com/JEFworks-Lab/STalign.git  ~/repos/STalign
 # Then this script installs them from the local copies (no github access needed).
 PASTE2_DIR="$HOME/repos/paste2"
@@ -63,7 +60,7 @@ mamba run -n otenv pip install "$PASTE2_DIR"
 mkenv stalignenv python=3.11 "numpy=1.23"
 mamba run -n stalignenv pip install "$STALIGN_DIR" scanpy h5py
 
-# --- castenv: CAST (GPU) -----------------------------------------------------
+# --- castenv (GPU) -----------------------------------------------------------
 # cu121 wheels run on the 12.x GPU nodes (module cuda/12.4.1). torch and DGL MUST be
 # a matched pair - pin torch to a version DGL ships wheels for (DGL lags torch, so
 # don't let pip grab the newest torch). If DGL's URL 404s, try the plain

@@ -185,7 +185,7 @@ Runs one gene through the identical code path and writes
 
 ## Limits to state in any write-up
 
-4 Day 0 vs 8 Day 9 animals → **ranked candidates calibrated on blanks, not an FDR-significant
+3 Day 0 vs 5 Day 9 mice → **ranked candidates calibrated on blanks, not an FDR-significant
 set**; the ~210 slice pairs come from 31 slices and are not independent. The radial axis is
 blind to focal lesions. Targeted 940-gene panel → within-panel ranking only. Cell types were
 defined by these same genes (position was never a clustering input, so positional claims are

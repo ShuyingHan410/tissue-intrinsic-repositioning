@@ -1,7 +1,7 @@
 # Pool + score every method's Day0->Day9 partials three ways:
 #   raw            comparator coupling MASS (as originally reported), ties -> min
 #   colnorm        mass per unit of Day9 target mass (abundance-corrected), ties -> min
-#   colnorm_avg    same, ties averaged (hard-matching methods such as CAST produce ties)
+#   colnorm_avg    same, ties averaged (hard-matching methods produce ties)
 # MorphoGAM (S) and the expression baseline are not couplings and are scored unchanged.
 # Comparators ran on the adata grid (10 Day0 x 25 Day9 = 250 units); MorphoGAM/expression ran on
 # the 21 Day9 slices with manual layers (210 units) -> comparators are restricted to those 21.

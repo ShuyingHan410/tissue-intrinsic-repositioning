@@ -89,7 +89,7 @@ inverted. Upload the local `output_threelayer/per_slice_morphogam` if the cluste
 
 ## Known limits
 
-4 Day0 vs 8 Day9 animals -> ranked candidates calibrated on blanks, NOT an FDR-significant set;
+3 Day0 vs 5 Day9 mice -> ranked candidates calibrated on blanks, NOT an FDR-significant set;
 210 slice pairs come from 31 slices so they are not independent. The radial axis is blind to
 focal lesions. Targeted 940-gene panel -> within-panel ranking only. Cell types were defined
 by these same genes (hence the circularity screen). `marker` is a hand-curated list from the

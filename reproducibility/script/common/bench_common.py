@@ -5,13 +5,13 @@ Positive-control design
 -----------------------
 Take ONE Day0 (Healthy) slice, split it into two stratified halves (A, B) within
 each Tier2 cell type, and treat the halves as pseudo-replicates. Each benchmark
-method (moscot / CAST / PASTE2) produces a cell-by-cell correspondence between the
+method (moscot / PASTE2 / STalign) produces a cell-by-cell correspondence between the
 two halves; we aggregate it into a Tier2 x Tier2 matrix (rows = half A, cols = half B)
 and row-normalize. Because the two halves are statistically identical, a correct
 method should put the largest mass on the diagonal (each type -> itself), mirroring
 the self-match rank-1 behaviour of the three-step pipeline.
 
-Used by: benchmark_moscot_day0split.Rmd, benchmark_cast_day0split.Rmd,
+Used by: benchmark_moscot_day0split.Rmd,
          benchmark_paste2_day0split.Rmd
 """
 import os

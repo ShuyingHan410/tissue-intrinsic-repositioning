@@ -14,7 +14,7 @@ verification. Three levels of reproduction are defined in `reproducibility/READM
 | 3 | Quick-start vignette | `rmarkdown::render("vignettes/quick_start.Rmd")` | **pass** (renders; chunks executed) |
 | 4 | README examples | the two quick-start blocks run verbatim in the clean library (`pool_similarity(list(S))`, `test_displacement`) | **pass** (IAF 4 rank 3 of 8 in the single pair; *Igfbp5* reversed, Δ = +0.060) |
 | 5 | Figures 1–5 from documented checkpoints | fresh `git clone`; only the checkpoint files added at the paths in Level 2; all five scripts run; PNG compared byte-for-byte with the submitted files | **pass** (5 of 5 byte-identical; PDFs differ in creation timestamp only) |
-| 6 | Supplementary figures | same clone: `make_fig3_gene_simulation.R`, `make_figS_benchmark_sensitivity.py`, `make_figS_skin_validation.R` | **pass** (3 of 3 byte-identical). The two animal-level sensitivity figures of the current supplement draft are **not in the repository** (author decision pending) |
+| 6 | Supplementary figures | same clone: `make_fig3_gene_simulation.R`, `make_figS_benchmark_sensitivity.py`, `make_figS_skin_validation.R` | **pass** (3 of 3 byte-identical) |
 | 7 | Figure-input generators | `export_colon_sections.py` vs the 52 section tables used in the paper; `make_figure_assets.py` vs the six shipped figure-input tables; `04_figure5_calls.R` vs the Figure 5 table | **pass** (section tables identical; six of six tables identical in content, four byte-identical, two differing only in row order or quoting; gene calls identical to 4e-16) |
 | 8 | Manuscript figure references | `\includegraphics` in `manuscript_revised.tex` / `supplement_revised.tex` mapped to scripts (see `FIGURE_REPRODUCTION_MANIFEST.md`) | **pass** for Figs 1–5 and three supplementary figures; two supplementary figures outside the repository (see 6) |
 | 9 | Hard-coded author paths in tracked scripts | `git grep` for home, user and cluster paths | **pass**: none remain; cluster scripts take `BENCH`, `ADATA`, `CONDA_BASE`; stage scripts take `COORD_DIR`, `ALL_SLICES`, `SIM_DIR` |
@@ -50,5 +50,4 @@ verification. Three levels of reproduction are defined in `reproducibility/READM
 ## Known limitations stated to the reader
 
 The reproduction guide says explicitly that Level 3 reproduces the automatic coordinate fits but not
-the hand-traced ones, that the comparator benchmark and the gene sweep need a cluster, and that the two
-animal-level supplementary figures are not yet in the repository.
+the hand-traced ones, and that the comparator benchmark and the gene sweep need a cluster.

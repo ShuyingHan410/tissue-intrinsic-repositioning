@@ -1,4 +1,4 @@
-"""Abundance sensitivity, v2 (2026-11-01, SLAT replaces CAST). Definition as in methods_section.tex,
+"""Abundance sensitivity, v2 (2026-11-01). Definition as in methods_section.tex,
 'Abundance sensitivity': within every origin row of every kept Day0 x Day9 pair, Spearman correlation between
 the method's raw score for each candidate and that candidate's share of the fibroblast-lineage (Tier1 ==
 Fibroblast) cells of the Day9 section; median over rows and pairs. Also: % of pairs in which IAF 2 or IAF 3 is

@@ -18,7 +18,6 @@ differ from the submitted PDFs in metadata only.
 | Supp. FDR and ablation | `make_fig3_gene_simulation.R` | `simulation/v16/{batch2_fdr,ablB_k10,exp1_typeI,batch2_power,batch2_spec}.csv` | checkpoint (simulation) | `figS_fdr_ablation.pdf/.png` (+ two `legacy_*` panels not in the submission) | laptop, < 1 min | PNG byte-identical |
 | Supp. benchmark sensitivity | `make_figS_benchmark_sensitivity.py` | `benchmark_out/day0_day9/per_pair_scores_all_methods.csv`, `atlas_sections.csv`, coordinates (section list) | checkpoint | `cell_benchmark_sensitivity.pdf/.png`, two CSVs | laptop, < 1 min | PNG byte-identical; CSVs identical |
 | Supp. skin application | `make_figS_skin_validation.R` | values transcribed from `Skin_MC903_MERFISH/code/skin_main_results.Rmd` (in the script) | none | `skin_validation_supplement.pdf/.png`, two CSVs | laptop, seconds | PNG byte-identical |
-| Supp. animal-level sensitivity (two figures in the current supplement draft) | not in this repository | — | `recomb2027_revision/` (authors' working folder) | — | — | pending the authors' decision on whether the analysis stays in the manuscript |
 
 ## Figure-input tables (derived; shipped in the checkpoint and regenerable)
 

@@ -1,8 +1,10 @@
 # Revised Simulation Plan for Benchmarking Directional Gene Repositioning
 
+*Terminology. Throughout this plan, the grouping level called "mouse" (and "pseudo-mouse", σ_mouse, b_m) is the atlas `Technical_repeat_number`: 4 technical repeats at Day 0 and 8 at Day 9. The sections come from 3 mice at Day 0 and 5 mice at Day 9.*
+
 *Version 16 changes from v15 — a restructure, not a redesign, prompted by a second external review. (1) **§0 is rewritten as the single operative protocol**; §0a–§0c and the v12 core-benchmark text (now §0-hist) are the change log and must not be used for new runs. (2) **Experiment 1 runs first and alone**; a comparator non-nominal at a τ_θ level is reported only at its matched threshold there. (3) **Null 1 at the new reference τ_θ = 0.05 (size 1) is calibrated**: 4.44% [4.01, 4.87], n_eff 9,014, realised I² 15.2% — all four prespecified levels now pass. (4) **Experiment 0 completed as specified**: all four quantities with p10/p90 at every stratum, size 1 added (`v16/ppc_neff.csv`, `ppc_neff.png`). (5) τ_θ = 0.05 propagated: Experiments 7 and 8 take it as primary; Experiment 3 stays at 0.15 with the reason stated. (6) τ_θ is the *imposed* parameter; on real-geometry substrates total heterogeneity is summarised only by realised I². (7) The bimodal shape is written as the one-parameter family the engine implements. The gate decision (§0.6) was resolved the same day: option (a) frozen, real pipeline re-gated, 227 → 199 calls. **In-place edits after a third review (same day):** matched thresholds are design-specific \(c_{m,k,\tau}\) and a comparator Null 1 at k = 20 (Experiment 1b) is added; the FDR repair is pre-specified as BH on empirically calibrated p-values \(\tilde p=\hat F_0(p)\) alongside native BH; method roles are stated once in §0.3; the Experiment 3 rationale is reworded as a design intent, not a predicted result.*
 
-*Version 15 changes from v14, written after the local calibration stage (`simulation/v16/CALIBRATION_STAGE.md`) and before any cluster run (see §0c). (1) **k = 10 confirmed calibrated**: Type I 4.4–4.7% at every τ_θ on ~10,000 effective null tests per cell; the earlier 8% was noise. (2) **NB size = 1** for all new runs: real Fibro 2 genes have N_eff/N_event of 0.944 / 0.889 / 0.611 at 27 / 64 / 331 molecules, size 1 matches within 1% at every stratum, size 2 overstates by 4–10%. (3) **τ_θ = 0.05 is the real-median heterogeneity** (realised I² 14% at k = 10; the estimator floor at k = 10 is 0, not 11%), so Experiments 1–2 gain a fourth τ_θ level and the reference becomes 0.05. (4) **σ_mouse ≈ 0** for the typical real gene (three-level REML on the Day-9 daughter arms, 8 mice; 75th percentile 0.04–0.07, 90th indistinguishable from blanks), so Experiment 9 runs σ_mouse ∈ {0.07, 0.20} and the reference is 0. (5) Engine extensions for Experiments 6b, 9, 11 smoke-tested. One item remains open: the gate decision (§0b B1).*
+*Version 15 changes from v14, written after the local calibration stage (`simulation/v16/CALIBRATION_STAGE.md`) and before any cluster run (see §0c). (1) **k = 10 confirmed calibrated**: Type I 4.4–4.7% at every τ_θ on ~10,000 effective null tests per cell; the earlier 8% was noise. (2) **NB size = 1** for all new runs: real Fibro 2 genes have N_eff/N_event of 0.944 / 0.889 / 0.611 at 27 / 64 / 331 molecules, size 1 matches within 1% at every stratum, size 2 overstates by 4–10%. (3) **τ_θ = 0.05 is the real-median heterogeneity** (realised I² 14% at k = 10; the estimator floor at k = 10 is 0, not 11%), so Experiments 1–2 gain a fourth τ_θ level and the reference becomes 0.05. (4) **σ_mouse ≈ 0** for the typical real gene (three-level REML on the Day-9 daughter arms, 8 technical repeats; 75th percentile 0.04–0.07, 90th indistinguishable from blanks), so Experiment 9 runs σ_mouse ∈ {0.07, 0.20} and the reference is 0. (5) Engine extensions for Experiments 6b, 9, 11 smoke-tested. One item remains open: the gate decision (§0b B1).*
 
 *Version 14 changes from v13, written the same day and before any v13 run (see §0b), prompted by an external review and two same-day measurements. (1) **Gate-induced selection is part of the estimand**: every cell reports P(testable), k₀, k₉, power | testable and P(correct discovery), and the benchmark and the headline real analysis must use the same per-slice gate — the real main branch currently uses a transcript/rate floor while the simulation and the stratified branch use SE₀ < 0.05. (2) **Generator fidelity check** (Experiment 0): real versus simulated N_event, N_eff, N_eff/N_event and max-share per abundance stratum, with a pass criterion, before the abundance experiments run. (3) **Substrate realism stated and tested**: the ten real Day-0 slices differ in spread enough to inject τ_θ ≈ 0.06 of geometric heterogeneity into an effect gene, which pooled resampling erases; a within-slice bootstrap cell (Type I 6.5% vs pooled 4.0%; power 97.5% vs 97.0%) is added to Experiment 5, and pseudo-mice are described as grouping labels. (4) Four robustness cells: awkward directional shapes (Exp 11), heavy-tailed and single-outlier mouse effects (in Exp 9), FDR under correlated gene blocks (Exp 6b), and the Fibro 6 substrate promoted to Exp 10. (5) Required QQ diagnostic for λ down to p = 10⁻³. (6) A wording rule scoping every comparative claim to directional first-moment repositioning on a matched substrate at a matched operating point. No method, comparator specification, or completed result is altered.*
 
@@ -364,7 +366,7 @@ slices into two literal halves. Once slices became synthetic resamples (v10 §1)
 no remaining justification, but the count was carried forward and the v10 text describes
 "4 mice / ~5 slices per arm" as matching the real design. It does not. The real design is:
 
-| real arm | slices pooled for a typical gene | mice | slices per mouse |
+| real arm | slices pooled for a typical gene | technical repeats | slices per technical repeat |
 |---|---:|---:|---|
 | parent, Day 0 Fibro 2 | **10** (1,005 of 1,026 genes) | 4 | 2, 3, 3, 2 |
 | daughter, Day 9 IAF 4 | 18–21 (most genes) | 7 | 1–3 |
@@ -525,7 +527,7 @@ Fit a three-level REML model (`metafor::rma.mv`, slices nested in mice) to the r
 from 7 mice; also Fibro 6 → IAF 2/3: 20 slices). Report, across the ~1,000 genes per lineage,
 the distribution of the mouse-level variance share and the median implied
 \(\sigma_{\text{mouse}}\) on the θ scale (via \(\tau_\delta \approx \tau_\theta\,SD(r)\), §9).
-The Day-0 arm (4 mice) is not used for estimation.
+The Day-0 arm (4 technical repeats) is not used for estimation.
 
 **Amendment (ii) — Experiment 9, the deployed pipeline.** At k = 10, Null 1 and gained
 \(|D| = 0.05\), \(\tau_\theta \in \{0, 0.15\}\), \(\sigma_{\text{mouse}}\) at the estimated
@@ -770,8 +772,8 @@ localised shift if the window aligns with a domain boundary and loses if it stra
 
 ## B5. Non-normal mouse effects
 
-**The issue.** Mouse and slice heterogeneity enter as additive normal effects. With four mice per
-arm, REML + Knapp–Hartung is sensitive to one unusual animal, and real between-mouse
+**The issue.** Mouse and slice heterogeneity enter as additive normal effects. With four pseudo-mice per
+arm, REML + Knapp–Hartung is sensitive to one unusual mouse, and real between-mouse
 differences are not guaranteed to be normal.
 
 **Experiment 9, two added cells** (proposed with λ on, GAM-fs, DESpace2; k = 10; Null 1 and
@@ -961,7 +963,7 @@ which supports reading the real median heterogeneity as largely geometric.
 
 ## C4. σ_mouse — resolves §0a A4(i); fixes Experiment 9's levels
 
-Three-level REML (slices in mice) on the real Day-9 daughter arms, 8 mice, 18–21 slices,
+Three-level REML (slices in technical repeats) on the real Day-9 daughter arms, 8 technical repeats, 18–21 slices,
 ~1,000 genes across four lineages:
 
 | | genes | blanks |
@@ -971,7 +973,7 @@ Three-level REML (slices in mice) on the real Day-9 daughter arms, 8 mice, 18–
 | 75th percentile | 0.04–0.07 | — |
 | 90th percentile | 0.08–0.12 | 0.14 |
 
-Blanks carry no mouse biology, so their upper tail is the estimation floor with 8 mice; the
+Blanks carry no mouse biology, so their upper tail is the estimation floor with 8 technical repeats; the
 genes' tail is not distinguishable from it. \(\hat\sigma_{\text{mouse}} \approx 0\) for the
 typical gene. The v2 decision not to model mouse and the observed real \(\hat\lambda \approx 1\)
 are consistent with this. v12's 0.20 is about twice the real 90th percentile.
@@ -1352,9 +1354,9 @@ calibration null, likely too small for the B1 power comparison. Commit to **both
 1. **Synthetic pseudo-mice (primary for B1).** Build pseudo-slices by resampling cells from the
    pooled Day-0 coordinate distribution, with slice sizes drawn from the observed distribution;
    group pseudo-slices into pseudo-mice; assign pseudo-mice to arms. This preserves real
-   geometry while letting the mouse and slice counts match the real design (4 mice / ~5 slices
+   geometry while letting the mouse and slice counts match the real design (4 technical repeats / ~5 slices
    per arm) instead of halving them.
-2. **Literal mouse split (realism check).** The real 4 Day-0 mice split 2 v 2, carrying their
+2. **Literal mouse split (realism check).** The real 4 Day-0 technical repeats split 2 v 2, carrying their
    slices. Small, but uses the untouched empirical design.
 
 Report which construction produced each number. Do not leave the assignment rule implicit.
@@ -2294,7 +2296,7 @@ To be runnable, fix the synthetic design explicitly:
 M=64\ \text{molecules per slice},
 \]
 
-matching the colon medians of §8, with 4 mice per arm to retain the nesting structure of §10.
+matching the colon medians of §8, with 4 pseudo-mice per arm to retain the nesting structure of §10.
 This synthetic benchmark can otherwise be smaller than the colon-anchored benchmark: use the
 same scenario set but only the primary effect size \(|D|=0.05\) unless a discrepancy with
 Simulation A appears, in which case expand it to the full grid to localize the cause.
@@ -3086,7 +3088,7 @@ with
 
 Purpose:
 
-> Determine whether treating slices as independent inflates Type I error and whether a hierarchical animal-level model is required.
+> Determine whether treating slices as independent inflates Type I error and whether a hierarchical mouse-level model is required.
 
 ### The grid, specified
 
@@ -3120,7 +3122,7 @@ Three specific questions this answers:
    empirical null is non-Gaussian in shape and the current estimator is measuring the wrong
    feature of it.
 3. Would an explicit mouse random effect \(\delta_{ms}=\mu+b_m+\epsilon_{ms}\) do better, and
-   is it estimable at 4 and 8 mice per arm?
+   is it estimable at 4 and 8 technical repeats per arm?
 
 Question 3 is the acknowledged weak point of the current framework; the simulation is the
 only place it can be answered, since the real data has too few mice to fit the model reliably.

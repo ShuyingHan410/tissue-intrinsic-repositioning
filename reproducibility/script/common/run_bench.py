@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Standalone driver for the Day0 half-split benchmark (no R / rmarkdown needed).
 
-Runs one method (moscot | paste2 | stalign | cast) over BOTH lineages
+Runs one method (moscot | paste2 | stalign) over BOTH lineages
 (Fibroblast, Epithelial), pooling all 10 Day0 (Healthy) slices, and writes
 <method>_typematrix_<lineage>.csv into --out. Uses bench_common, so the shared
 7/11 input-cell filter (LINEAGE_TYPES) and slice pooling are applied identically
@@ -10,8 +10,6 @@ to every method. Plot the CSVs afterward with bench_heatmap.R for the heatmaps.
 Examples (on FASRC):
   python run_bench.py --method paste2 --adata /path/adata.h5ad \
          --out /path/benchmark_out/paste2 --max_cells 4000
-  python run_bench.py --method cast   --adata /path/adata.h5ad \
-         --out /path/benchmark_out/cast   --max_cells 4000
 """
 import argparse
 import gc
@@ -201,16 +199,6 @@ def m_slat(p):
 
 
 def m_cast_stack(p):
-    """CAST run as designed for cross-sample use (Tang et al. 2024): CAST_MARK embeddings, then
-    CAST_STACK registration of the Day9 section (query) onto the Day0 section (reference) by
-    affine + B-spline free-form deformation guided by the embeddings, then matching in the
-    REGISTERED frame. The earlier `cast` wrapper skipped CAST_STACK and chose candidates in raw
-    slide coordinates (different slides -> arbitrary), so it must not be reported as CAST.
-    Coupling is SOFT: each Day9 cell spreads unit mass over its k nearest Day0 cells in the
-    registered frame, weighted by a Gaussian kernel of registered distance (scale = median
-    nearest-neighbour distance) times the non-negative embedding cosine similarity. No integer
-    ties. Smoke-test on one unit before submitting the array: reg_params fields and the
-    gpu/device convention are taken from the CAST source and may need adjusting."""
     import torch
     from sklearn.neighbors import NearestNeighbors
     from sklearn.preprocessing import normalize
@@ -223,15 +211,13 @@ def m_cast_stack(p):
     A, B, _, _ = bc.load_pair(p)
     A_xy = np.asarray(A.obsm["spatial"], dtype=np.float64); B_xy = np.asarray(B.obsm["spatial"], dtype=np.float64)
     # CAST_MARK takes plain arrays: coords -> delaunay_dgl(np.array(df)), expression -> torch.tensor(..., device).
-    # Demo1 feeds normalize_total(1e4) counts; adata.X here is log-normalised, which CAST also accepts.
     coords = {"A": A_xy, "B": B_xy}
     expr = {"A": bc._todense(A.X).astype(np.float32), "B": bc._todense(B.X).astype(np.float32)}
     tag = str(p.get("_urepr") or p.get("slice_id", "FIRST"))
     tag = "".join(c if (c.isalnum() or c in "._-") else "_" for c in tag)
     work = os.path.join(p["out_dir"], "cast_stack", tag); os.makedirs(work, exist_ok=True)
     embed = CAST_MARK(coords, expr, work, task_name_t=tag, if_plot=False)      # dict {"A": tensor, "B": tensor}
-    # --- registration: query B (Day9) onto reference A (Day0). Parameters exactly as CAST's demo2
-    # (demo2_CAST_Stack_Align_S4_to_S1): a bare reg_params(dataname=...) is NOT valid because the
+    # --- registration: query B (Day9) onto reference A (Day0). A bare reg_params(dataname=...) is NOT valid because the
     # list fields (d_list, attention_params, iterations_bs, ...) default to [] and CAST_STACK indexes them.
     params = reg_params(dataname=tag,
                         gpu=0 if torch.cuda.is_available() else -1,
@@ -486,7 +472,7 @@ def run_method(method_name, base, only_unit=None, pool_only=False):
                     p["slice_a"], p["slice_b"] = u
                 else:
                     p["slice_id"] = u
-                p["_urepr"] = str(u)   # unique tag (CAST uses it for its mark dir)
+                p["_urepr"] = str(u)   # unique tag (used for per-unit work dirs)
                 f = _partial_path(base["out_dir"], method_name, lineage, i)
                 try:
                     M = method(p)
@@ -568,7 +554,7 @@ def main():
     ap.add_argument("--sample_type", default="Healthy", help="Day0 = Healthy")
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--lineages", nargs="+", default=["Fibroblast", "Epithelial"])
-    # STalign / CAST knobs (ignored by the others)
+    # method-specific knobs (ignored by the others)
     ap.add_argument("--raster_dx", type=float, default=30)
     ap.add_argument("--niter", type=int, default=200)
     ap.add_argument("--sigma_mult", type=float, default=2)

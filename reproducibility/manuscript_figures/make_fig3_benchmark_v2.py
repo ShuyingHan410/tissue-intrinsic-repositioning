@@ -1,4 +1,4 @@
-"""Figure 3 (v2, 2026-10-31: SLAT added, old CAST wrapper row dropped; comparators restricted to exactly the (Day0, Day9, origin) pairs MorphoGAM scored: 200/210/180; raw scoring) - benchmarking population correspondence against alignment-based methods.
+"""Figure 3 (v2, 2026-10-31: SLAT added; comparators restricted to exactly the (Day0, Day9, origin) pairs MorphoGAM scored: 200/210/180; raw scoring) - benchmarking population correspondence against alignment-based methods.
 A: per-section-pair normalized rank of the atlas-supported Day 9 match, three linkages x five methods.
 B: share of testable pairs with the match in the top three candidates.
 C: fibroblast-lineage composition of the 21 Day 9 sections, every population shown (recovery targets in blue, others muted)."""
